@@ -1,3 +1,5 @@
 /target
 *.png
 *.svg
+/.idea
+.DS_Store
