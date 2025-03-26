@@ -1,6 +1,7 @@
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, Var};
 use candle_core::backprop::GradStore;
-use candle_nn::{linear, AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use candle_nn::{linear, AdamW, Linear, Optimizer, ParamsAdamW, VarBuilder, VarMap, SGD};
+use candle_nn::Init::Const;
 use plotters::prelude::{BitMapBackend, ChartBuilder, Circle, Color, DiscreteRanged, EmptyElement, IntoDrawingArea, IntoFont, IntoLinspace, IntoSegmentedCoord, LabelAreaPosition, LineSeries, PathElement, PointSeries, Text, BLACK, BLUE, GREEN, RED, WHITE};
 use plotters::prelude::full_palette::PURPLE;
 use rand::prelude::SliceRandom;
@@ -414,7 +415,7 @@ fn candle_basic_model_dataset_noise_nn_demo(device: &Device) -> Result<()> {
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
     let model = linear(2, 1, vb.pp("linear"))?;
     let params = ParamsAdamW {
-        lr: 0.03,
+        lr: 0.003,
         ..Default::default()
     };
     let mut opt = AdamW::new(varmap.all_vars(), params)?;
@@ -422,18 +423,33 @@ fn candle_basic_model_dataset_noise_nn_demo(device: &Device) -> Result<()> {
         for (batch_i, (sample_x, sample_y)) in data_iter(batch_size, &features, &labels, &device)?.into_iter().enumerate() {
             let ys = model.forward(&sample_x)?;
             // 损失函数
-            let loss = (ys.sub(&sample_y)?.sqr()?/2f64)?.sum_all()?;
+            // let loss = (ys.sub(&sample_y)?.sqr()?/2f64)?.sum_all()?;
+            let loss = (ys.sub(&sample_y)?.sqr()?/2f64)?;
             // 反向传播 得到梯度最优的参数
             opt.backward_step(&loss)?;
-            // println!("{step} {}", loss.to_vec0::<f32>()?);
+            // println!("{step} {}", loss.sum_all()?.to_vec0::<f32>()?);
+
+            // println!("{:?} loss={}, w={}, b={},lr={:?}"
+            //          ,step+1
+            //          , loss.sum_all()?.to_vec0::<f32>()?
+            //          ,model.weight()
+            //          , model.bias().unwrap()
+            //          , opt.learning_rate()
+            //          ,
+            // );
         }
 
         // 测试
-        // let train_1 = (&model.forward(&features)?.sub(&labels)?.sqr()?/2f64)?;
-        // println!("epoch {:?}, loss {:.2}", step+1, train_1.mean(0)?);
+        // let train_1 = ((model.forward(&features)?).sub(&labels)?.sqr()?/2f64)?;
+        // println!("迭代优化epoch {:?}, loss {:.2}", step+1, train_1.mean(0)?);
+        // println!("w={}, b={},lr={:?}", model.weight()
+        //          , model.bias().unwrap()
+        //          , opt.learning_rate()
+        //          ,
+        // );
     }
 
-    println!("w={}, b={},lr={:?}", model.weight()
+    println!("最终输出w={}, b={},lr={:?}", model.weight()
              , model.bias().unwrap()
              , opt.learning_rate()
              ,
@@ -446,9 +462,104 @@ fn candle_basic_model_dataset_noise_nn_demo(device: &Device) -> Result<()> {
     Ok(())
 }
 
+/// 简单的线性回归模型，基于candle-nn实现
+fn candle_basic_modle_sgd_linear_regression_demo(device: &Device) -> Result<()> {
+    // 定义一参照组
+    let true_w = Tensor::new(&[[3f32, 1.0]], device)?;
+    let true_b = Tensor::new(-2f32, device)?;
+    let true_m = Linear::new(true_w.clone(), Some(true_b.clone()));
+    let sample_xs = Tensor::new(&[[2f32, 1.], [7., 4.], [-4., 12.], [5., 8.]], &Device::Cpu)?;
+    let sample_ys = true_m.forward(&sample_xs)?;
+
+    /// 接下来使用SGD优化参数的结果和实际进行比较
+    /// w 和 b 置为0
+    let train_w = Var::new(&[[0f32, 0.]],device)?;
+    let train_b = Var::new(0f32,device)?;
+    // 优化器
+    let mut sgd = SGD::new(vec![train_w.clone(), train_b.clone()], 0.004)?;
+    let train_m = Linear::new(train_w.as_tensor().clone(), Some(train_b.as_tensor().clone()));
+    // 迭代训练
+    for _epoch in 0..1000 {
+        // 预测
+        let train_ys = train_m.forward(&sample_xs)?;
+        // 损失函数
+        let loss = (train_ys.sub(&sample_ys)?.sqr()?/2f64)?.sum_all()?;
+        // 优化
+        //sgd.step(&loss.backward()?); // 同下
+        sgd.backward_step(&loss)?;
+    }
+    println!("最终输出w={}, b={},loss={} {}"
+             , train_w
+             , train_b
+             , (true_w.clone()-(&train_w).as_tensor())?
+             , (true_b.clone()-(&train_b).as_tensor())?);
+
+    Ok(())
+}
+
+/// 代码基本上同上，只是使用Adam优化器
+fn candle_basic_modle_sgd_linear_regression_adm_demo(device: &Device) -> Result<()> {
+    // 定义一参照组
+    let true_w = Tensor::new(&[[3f32, 1.0]], device)?;
+    let true_b = Tensor::new(-2f32, device)?;
+    let true_m = Linear::new(true_w.clone(), Some(true_b.clone()));
+    let sample_xs = Tensor::new(&[[2f32, 1.], [7., 4.], [-4., 12.], [5., 8.]], &Device::Cpu)?;
+    let sample_ys = true_m.forward(&sample_xs)?;
+
+    /// 接下来使用ADM优化参数的结果和实际进行比较
+    /// w 和 b 置为0
+    let train_w = Var::new(&[[0f32, 0.]],device)?;
+    let train_b = Var::new(0f32,device)?;
+    // 有时候可能存在将w和b设置为其他值的情况，所以需要使用VarMap来管理变量
+    // 定义命名变量
+    let mut var_map = candle_nn::VarMap::new();
+    let train_w = var_map.get((1, 2), "w", Const(0.), DType::F32, &Device::Cpu)?;
+    let train_b = var_map.get((), "b", Const(0.), DType::F32, &Device::Cpu)?;
+
+    // 优化器
+    let params = ParamsAdamW {
+        lr: 0.1,
+        ..Default::default()
+    };
+    // let mut opt = AdamW::new(vec![train_w.clone(), train_b.clone()], params)?;
+    let mut opt = AdamW::new(var_map.all_vars(), params)?;
+    let train_m = Linear::new(train_w.clone(), Some(train_b.clone()));
+    // 迭代训练
+    for _epoch in 0..1000 {
+        // 预测
+        let train_ys = train_m.forward(&sample_xs)?;
+        // 损失函数
+        let loss = (train_ys.sub(&sample_ys)?.sqr()?/2f64)?.sum_all()?;
+        // 优化
+        //sgd.step(&loss.backward()?); // 同下
+        opt.backward_step(&loss)?;
+    }
+    // println!("最终输出w={}, b={},loss={} {}"
+    //          , train_w
+    //          , train_b
+    //          , (true_w.clone()-(&train_w).as_tensor())?
+    //          , (true_b.clone()-(&train_b).as_tensor())?);
+
+    println!("最终输出w={}, b={},loss={} {}"
+             , train_w
+             , train_b
+             , (true_w.clone()-(&train_w))?
+             , (true_b.clone()-(&train_b))?);
+    // 重置w和b
+    var_map.set([("w", Tensor::zeros((1, 2), DType::F32, &Device::Cpu)?)].into_iter())?;
+    var_map.set([("b", Tensor::ones((), DType::F32, &Device::Cpu)?)].into_iter())?;
+    println!("重置后输出w={}, b={},loss={} {}"
+             , train_w
+             , train_b
+             , (true_w.clone()-(&train_w))?
+             , (true_b.clone()-(&train_b))?);
+    Ok(())
+}
 fn main() {
     let device = Device::Cpu;
-    candle_basic_model_dataset_noise_nn_demo(&device);
+    candle_basic_modle_sgd_linear_regression_adm_demo(&device);
+    // candle_basic_modle_sgd_linear_regression_demo(&device);
+    // candle_basic_model_dataset_noise_nn_demo(&device);
     // candle_baisc_modle_dataset_noise_demo(&device);
     // candle_basic_modle_linermodel_demo_v3(&device);
     // candle_basic_modle_linermodel_demo_v2(&device);
