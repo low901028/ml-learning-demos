@@ -1,6 +1,6 @@
-use std::ops::Div;
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, Var};
 use candle_core::backprop::GradStore;
+use candle_nn::{linear, AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use plotters::prelude::{BitMapBackend, ChartBuilder, Circle, Color, DiscreteRanged, EmptyElement, IntoDrawingArea, IntoFont, IntoLinspace, IntoSegmentedCoord, LabelAreaPosition, LineSeries, PathElement, PointSeries, Text, BLACK, BLUE, GREEN, RED, WHITE};
 use plotters::prelude::full_palette::PURPLE;
 use rand::prelude::SliceRandom;
@@ -366,10 +366,90 @@ fn candle_baisc_modle_dataset_noise_demo(device: &Device) -> Result<()> {
     Ok(())
 }
 
+/// 因在candle中提供了candle-nn crate来封装了模型
+/// 故将candle_baisc_modle_dataset_noise_demo 自定义过程用candle-nn来实现
+fn candle_basic_model_dataset_noise_nn_demo(device: &Device) -> Result<()> {
+    // 线性模型
+    let true_w = Tensor::new(&[2f32,3.4], device)?;
+    let true_b = 4.2f32;
+
+    /// step-1: 生成数据集
+    fn synthetic_data(w: &Tensor, b: f32, num_examples: usize, device: &Device) -> Result<(Tensor, Tensor)> {
+        let X = Tensor::randn(0f32, 1.0f32, (num_examples, w.dim(0)?), &device)?;
+        let y = (X.matmul(&w)? + b as f64)?;
+        let y_clone = y.clone();
+        let y = (y + Tensor::randn(0f32, 1.0f32, y_clone.shape(), &device)?)?;
+
+        Ok( (X, y.reshape(((),1))?))
+    }
+
+    let (features, labels) = synthetic_data(&true_w.reshape(((),1))?, true_b, 1000, device)?;
+    println!("features={}, lables={}", features.i(0)?, labels.i(0)?);
+
+    /// batch_size 小批量
+    /// features 特征数据
+    /// labels 标签数据
+    fn data_iter(batch_size: usize, features: &Tensor, labels: &Tensor, device: &Device) -> Result<Vec<(Tensor, Tensor)>>{
+        let num_examples = features.dim(0)?;
+        let mut indices = Tensor::arange(0, num_examples as u32, &device)?.to_vec1::<u32>()?;
+        let mut rng = rand::thread_rng();
+        indices.shuffle(&mut rng);
+
+        let mut batch_examples = Vec::<(Tensor, Tensor)>::new();
+
+        for (i, batch_indices) in indices.chunks(batch_size).enumerate() {
+            let batch_indices = Tensor::from_slice(batch_indices, (batch_size,), &device)?;
+            let batch_features = features.i(&batch_indices)?;
+            let batch_labels = labels.i(&batch_indices)?;
+            // println!("batch_index={i}, batch_features={batch_features}, batch_labels={batch_labels}");
+            //
+            batch_examples.push((batch_features, batch_labels));
+        }
+
+        Ok(batch_examples)
+    }
+    let batch_size = 10;
+
+    let varmap = VarMap::new();
+    let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
+    let model = linear(2, 1, vb.pp("linear"))?;
+    let params = ParamsAdamW {
+        lr: 0.03,
+        ..Default::default()
+    };
+    let mut opt = AdamW::new(varmap.all_vars(), params)?;
+    for step in 0..10 {
+        for (batch_i, (sample_x, sample_y)) in data_iter(batch_size, &features, &labels, &device)?.into_iter().enumerate() {
+            let ys = model.forward(&sample_x)?;
+            // 损失函数
+            let loss = (ys.sub(&sample_y)?.sqr()?/2f64)?.sum_all()?;
+            // 反向传播 得到梯度最优的参数
+            opt.backward_step(&loss)?;
+            // println!("{step} {}", loss.to_vec0::<f32>()?);
+        }
+
+        // 测试
+        // let train_1 = (&model.forward(&features)?.sub(&labels)?.sqr()?/2f64)?;
+        // println!("epoch {:?}, loss {:.2}", step+1, train_1.mean(0)?);
+    }
+
+    println!("w={}, b={},lr={:?}", model.weight()
+             , model.bias().unwrap()
+             , opt.learning_rate()
+             ,
+    );
+
+    let w = model.weight();
+    let b = model.bias().unwrap();
+    println!("w的估计误差={}, b的估计误差={}", (&true_w.reshape(w.shape())?-w)?, (Tensor::new(&[true_b], device)?.reshape(b.shape())-b)?);
+
+    Ok(())
+}
 
 fn main() {
     let device = Device::Cpu;
-    candle_baisc_modle_dataset_noise_demo(&device);
+    candle_basic_model_dataset_noise_nn_demo(&device);
+    // candle_baisc_modle_dataset_noise_demo(&device);
     // candle_basic_modle_linermodel_demo_v3(&device);
     // candle_basic_modle_linermodel_demo_v2(&device);
     // candle_basic_modle_linermodel_demo_v1(&device);
