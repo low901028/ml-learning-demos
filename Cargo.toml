@@ -8,11 +8,22 @@ candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.
 candle-transformers = { git = "https://github.com/huggingface/candle.git", version = "0.8.4" }
 serde = { version = "1.0.215", features = ["derive"] }
 csv = "1.3"
-plotters = "0.3.7"
+# version= "0.3.7"
+plotters = { git = "https://github.com/plotters-rs/plotters.git", version = "0.3.7",default-features = true, features = ["plotters-bitmap"] }
 rand = "0.8.5"
 thiserror = "1.0.69"
 log = "0.4.26"
 candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.8.4" }
+candle-datasets = { git = "https://github.com/huggingface/candle.git", version = "0.8.4" }
+hf-hub = { version = "0.4.2", features = ["tokio"] }
+parquet = { version = "51.0.0" }
+image = { version = "0.25.2", default-features = true, features = ["jpeg", "png"] }
+flate2={ version = "1.1.0"}
+byteorder = { version = "1.5.0" }
+futures = "0.3.31"
+num_cpus = "1.16.0"
+tokio = "1.44.1"
+
 #ndarray="0.16.1"
 #polars= { version = "0.46", features = ["full"] }
 #half = "2.4.1"

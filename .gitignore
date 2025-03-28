@@ -3,3 +3,4 @@
 *.svg
 /.idea
 .DS_Store
+/*mnist*
