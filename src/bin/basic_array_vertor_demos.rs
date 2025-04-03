@@ -683,9 +683,47 @@ fn candle_datas_process_probability_demo_v2(device: &Device) -> Result<()> {
     Ok(())
 }
 
+fn candle_tensor_demo(device: &Device) -> Result<()> {
+    let a = Tensor::zeros((2, 3, 1), DType::F32, &Device::Cpu)?;
+    println!("unsqueeze-dim0: {}", a.unsqueeze(0)?);
+    println!("unsqueeze-dim1: {}", a.unsqueeze(1)?);
+    println!("unsqueeze-dim2: {}", a.unsqueeze(2)?);
+
+    println!("squeeze-dim0: {}", a.squeeze(0)?);
+    println!("squeeze-dim1: {}", a.squeeze(1)?);
+    println!("squeeze-dim2: {}", a.squeeze(2)?);
+
+    let y = Tensor::new(&[0u32,2],device)?;
+    let y_hat = Tensor::new(&[[0.1,0.3,0.6],[0.3,0.2,0.5]],device)?;
+    println!("y shape={:?}, y_hat={:?}", y, y_hat);
+    let dim = y_hat.shape().dims().get(0).unwrap_or(&1);
+    println!("y_hat.gather(0,y)={}", y_hat.gather(&y.reshape((*dim,()))?, 1)?);
+
+    Ok(())
+}
+
+/// 当需要获取tensor中指定index对应的数据时，
+/// 可以使用i(index)，也可以使用gather(index, dim)
+/// - i(index) 一次获取一个，并且行row和列column需要明确指定
+/// - gather(index, dim) 一次可以获取多个，需要明确dim
+fn candle_datas_process_get_item_by_index_demo(device: &Device) -> Result<()> {
+    let ids = Tensor::new(&[[0u32],[2]],device)?;
+    let ids = Tensor::new(&[0u32,2],device)?;
+    let y_hat = Tensor::new(&[[0.1,0.3,0.6],[0.3,0.2,0.5]],device)?;
+    // 使用i(index)一次获取一个
+    println!("item(row=1,column=0)={:?}", y_hat.i((0,0))?);
+    println!("item(row=2,column=2)={:?}", y_hat.i((1,2))?);
+    //使用gather 获取指定的ids所对应的数
+    println!("item(row=1,column=0)和item(row=2,column=2)={}", y_hat.gather(&ids.reshape(((),1))?, 1)?);
+
+    Ok(())
+}
+
 fn main() {
     let device = Device::Cpu;
-    candle_datas_process_probability_demo_v2(&device);
+    candle_datas_process_get_item_by_index_demo(&device);
+    //candle_tensor_demo(&device);
+    // candle_datas_process_probability_demo_v2(&device);
     // candle_datas_process_probability_demo(&device);
     //candle_datas_process_partial_der_process_demo(&device);
     // candle_datas_process_partial_der_demo(&device);

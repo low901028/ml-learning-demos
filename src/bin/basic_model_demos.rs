@@ -1,5 +1,8 @@
+use std::any::Any;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use candle_core::backprop::GradStore;
-use candle_core::{DType, Device, Error, IndexOp, Module, Result, Tensor, Var};
+use candle_core::{DType, Device, Error, IndexOp, Module, NdArray, Result, Tensor, Var, D};
 use candle_nn::Init::Const;
 use candle_nn::ops::softmax;
 use candle_nn::{AdamW, Linear, Optimizer, ParamsAdamW, SGD, VarBuilder, VarMap, linear};
@@ -9,10 +12,15 @@ use plotters::prelude::{BLACK, BLUE, BitMapBackend, ChartBuilder, Circle, Color,
 use rand::prelude::SliceRandom;
 use std::fs::File;
 use std::io::{self,BufReader, ErrorKind, Read, Write};
-use std::ops::Mul;
+use std::ops::{Deref, Index, Mul};
+use std::rc::Rc;
+use std::sync::Arc;
 use flate2::read::GzDecoder;
 use image::{imageops::FilterType, DynamicImage, GrayImage, ImageBuffer, ImageFormat, Rgb, Rgba};
 use byteorder::{BigEndian, ReadBytesExt};
+use candle_core::op::Op;
+use candle_datasets::vision::cifar::load_dir;
+use candle_datasets::vision::Dataset;
 use futures::{StreamExt, TryStreamExt};
 use futures::executor::block_on;
 use plotters::backend::{PixelFormat, RGBPixel};
@@ -961,9 +969,417 @@ fn candle_basic_model_mnist_images_demo(device: &Device) -> Result<()> {
 
     Ok(())
 }
+
+/// 如下方法是辅助读取fashion-mnist的gzip文件
+/// 读取gzip文件时需要注意采用BigEndian(大端序)还是LittleEndian(小端序)
+/// 否则数据读取出现非法不正确数据
+fn read_u32<T: Read>(reader: &mut T) -> std::io::Result<u32> {
+    use byteorder::ReadBytesExt;
+    reader.read_u32::<byteorder::BigEndian>()
+}
+
+/// 检测文件magic number是否正常
+fn check_magic_number<T: Read>(reader: &mut T, expected: u32) -> Result<()> {
+    let magic_number = read_u32(reader)?;
+    if magic_number != expected {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("incorrect magic number {magic_number} != {expected}"),
+        ))?;
+    }
+    Ok(())
+}
+/// 读取fashion-mnist标签文件
+fn read_labels(filename: &std::path::Path) -> Result<Tensor> {
+    let labels: GzDecoder<File> = GzDecoder::new(File::open(&filename)?);
+    let mut buf_reader = BufReader::new(labels);
+    check_magic_number(&mut buf_reader, 2049)?;
+    let samples = read_u32(&mut buf_reader)?;
+    let mut data = vec![0u8; samples as usize];
+    buf_reader.read_exact(&mut data)?;
+    let samples = data.len();
+    Tensor::from_vec(data, samples, &Device::Cpu)
+}
+/// 读取fashion-mnist图像文件
+fn read_images(filename: &std::path::Path) -> Result<Tensor> {
+    let images: GzDecoder<File> = GzDecoder::new(File::open(&filename)?);
+    let mut buf_reader = BufReader::new(images);
+    check_magic_number(&mut buf_reader, 2051)?;
+    let samples = read_u32(&mut buf_reader)? as usize;
+    let rows = read_u32(&mut buf_reader)? as usize;
+    let cols = read_u32(&mut buf_reader)? as usize;
+    let data_len = samples * rows * cols;
+    let mut data = vec![0u8; data_len];
+    buf_reader.read_exact(&mut data)?;
+    let tensor = Tensor::from_vec(data, (samples, rows * cols), &Device::Cpu)?;
+    tensor.to_dtype(DType::F32)? / 255.
+}
+/// 读取fashion-mnist数据集
+fn load_fashion_mnist() -> Result<Dataset> {
+    let home_dir = std::path::Path::new("datas");
+    let dataset = candle_datasets::vision::mnist::load_dir(home_dir)?;
+    println!("train images shape={:?}; labels={:?}", dataset.train_images.shape(), dataset.train_labels.shape());
+    println!("test images shape={:?}; labels={:?}", dataset.test_images.shape(), dataset.test_labels.shape());
+    Ok(dataset)
+}
+/// 读取gzip格式文件
+fn load_fashion_mnist_gz() -> Result<Dataset> {
+    let home_dir = std::path::Path::new("fashion_mnist");
+    let mut files = HashMap::with_capacity(4);
+    files.insert("train", ["train-images-idx3-ubyte.gz", "train-labels-idx1-ubyte.gz",]);
+    files.insert("test", ["t10k-images-idx3-ubyte.gz", "t10k-labels-idx1-ubyte.gz",]);
+
+    // train 数据集
+    let train_images_path = home_dir.join("train_gz").join("train-images-idx3-ubyte.gz");
+    let train_label_path = home_dir.join("train_gz").join("train-labels-idx1-ubyte.gz");
+    let train_images = read_images(&train_images_path)?;
+    let train_labels = read_labels(&train_label_path)?;
+
+    // test 数据集
+    let test_images_path = home_dir.join("test_gz").join("t10k-images-idx3-ubyte.gz");
+    let test_label_path = home_dir.join("test_gz").join("t10k-labels-idx1-ubyte.gz");
+    let test_images = read_images(&test_images_path)?;
+    let test_labels = read_labels(&test_label_path)?;
+
+    let dataset = candle_datasets::vision::Dataset {
+        train_images,
+        train_labels,
+        test_images,
+        test_labels,
+        labels: 10,
+    };
+
+    println!("train images shape={:?}; labels={:?}", dataset.train_images.shape(), dataset.train_labels.shape());
+    println!("test images shape={:?}; labels={:?}", dataset.test_images.shape(), dataset.test_labels.shape());
+    Ok(dataset)
+}
+
+const IMAGE_DIM: usize = 784;
+const LABELS: usize = 10;
+fn candle_basic_model_fashionmnist_demo(device: &Device) -> Result<()> {
+    /// 训练时定义的参数
+    struct TrainingArgs {
+        learning_rate: f64,
+        weight: Option<Tensor>,
+        bias: Option<Tensor>,
+        epochs: usize,
+    }
+    // 训练时定义的参数(默认)
+    let default_args = TrainingArgs {
+        learning_rate: 1.0,
+        weight: None,
+        bias: None,
+        epochs: 200,
+    };
+
+    /// 如下自定义模型
+    fn linear_z(in_dim: usize, out_dim: usize, vs: VarBuilder) -> Result<Linear> {
+        let ws = vs.get_with_hints((out_dim, in_dim), "weight", candle_nn::init::ZERO)?;
+        let bs = vs.get_with_hints(out_dim, "bias", candle_nn::init::ZERO)?;
+        Ok(Linear::new(ws, Some(bs)))
+    }
+
+    trait Model: Sized {
+        fn new(vs: VarBuilder) -> Result<Self>;
+        fn forward(&self, xs: &Tensor) -> Result<Tensor>;
+    }
+    struct LinearModel {
+        linear: Linear,
+    }
+    impl Model for LinearModel {
+        fn new(vs: VarBuilder) -> Result<Self> {
+            let linear = linear_z(IMAGE_DIM, LABELS, vs)?;
+            Ok(Self { linear })
+        }
+
+        fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+            self.linear.forward(xs)
+        }
+    }
+    fn train_mnist(dataset: Dataset, device: &Device, trainargs: TrainingArgs) -> Result<()> {
+        let W = Tensor::randn(0.0f32, 0.01, (LABELS,LABELS), device)?;
+        let b = Tensor::zeros((LABELS,), DType::F32, device)?;
+
+        let train_images = dataset.train_images.to_device(device)?;
+        let train_labels = dataset.train_labels;
+        let train_labels = train_labels.to_dtype(DType::U32)?.to_device(device)?;
+
+        let mut varmap = VarMap::new();
+        let vs = VarBuilder::from_varmap(&mut varmap, DType::F32, device);
+        let model = LinearModel::new(vs)?;
+        if let Some (weight) = trainargs.weight{
+            varmap.set([("w", W)].into_iter())?;
+        }
+        if let Some(bias) = trainargs.bias {
+            varmap.set([("b", b)].into_iter())?;
+        }
+        let mut sgd = SGD::new(varmap.all_vars(), trainargs.learning_rate)?;
+
+        let test_images = dataset.test_images.to_device(device)?;
+        let test_labels = dataset.test_labels.to_dtype(DType::U32)?.to_device(device)?;
+        for epoch in 1..trainargs.epochs {
+            let logits = model.forward(&train_images)?;
+            let log_sm = candle_nn::ops::log_softmax(&logits, D::Minus1)?;
+            let loss = candle_nn::loss::nll(&log_sm, &train_labels)?;
+            sgd.backward_step(&loss)?;
+
+            let test_logits = model.forward(&test_images)?;
+            let sum_ok = test_logits
+                .argmax(D::Minus1)?
+                .eq(&test_labels)?
+                .to_dtype(DType::F32)?
+                .sum_all()?
+                .to_scalar::<f32>()?;
+            let test_accuracy = sum_ok / test_labels.dims1()? as f32;
+            println!(
+                "{epoch:4} train loss: {:8.5} test acc: {:5.2}%",
+                loss.to_scalar::<f32>()?,
+                100. * test_accuracy
+            );
+        }
+
+        Ok(())
+    }
+
+    let dataset = load_fashion_mnist_gz()?;
+    train_mnist(dataset, &device, default_args)
+}
+
+/// dive into deep learning - softmax回归的从零开始实现
+fn candle_basic_model_fashionmnist_define_demo(device: &Device) -> Result<()> {
+    // let dataset = load_fashion_mnist()?;
+    let dataset = load_fashion_mnist_gz()?;
+    let W = Tensor::randn(0.0f32, 0.01, (IMAGE_DIM,LABELS), device)?;
+    let b = Tensor::zeros(LABELS, DType::F32, device)?;
+
+    let epochs = 200;
+    let batch_size = 256;
+    let train_images = dataset.train_images.to_device(device)?;
+    let train_labels = dataset.train_labels.to_dtype(DType::U32)?.to_device(device)?;
+
+    let test_images = dataset.test_images.to_device(device)?;
+    let test_labels = dataset.test_labels.to_dtype(DType::U32)?.to_device(device)?;
+
+    fn softmax(xs: &Tensor) -> Result<Tensor> {
+        let xs = xs.exp()?;
+        let sum = xs.sum_keepdim(D::Minus1)?;
+        xs.broadcast_div(&sum)
+    }
+    // 测试softmax
+    let X = Tensor::randn(0f32, 1., (4,5), device)?;
+    // let softmax_res = softmax(&train_images)?;
+    // let softmax_res = softmax(&X)?;
+    // println!("softmax: {}, sum={}", softmax_res, softmax_res.sum(1)?);
+
+    fn net(xs: &Tensor, w: &Tensor, b: &Tensor) -> Result<Tensor> {
+        println!("xs shape={:?}, dims={:?}", xs.shape(), xs.dims());
+        let dim = w.shape().dim(0)?;
+        let xs = xs.reshape(((),dim))?;
+        println!("after reshape: xs shape={:?}, dims={:?}", xs.shape(), xs.dims());
+        let xs = xs.broadcast_matmul(&w)?;
+        let xs = xs.broadcast_add(&b)?;
+        softmax(xs.as_ref())
+    }
+    // 测试net
+    let net_res = net(&train_images, &W, &b)?;
+    // let net_res = net(&X, &W, &b)?;
+    // println!("net= {}", net_res);
+
+    fn cross_entropy(y_hat: &Tensor, y: &Tensor, device: &Device) -> Result<Tensor> {
+        let temp_y = &y.reshape(((),1))?;
+        println!("reshape temp_y: shape={:?}", temp_y.shape());
+        let temp = y_hat.gather(temp_y, 1)?;
+        println!("temp probability={}", temp);
+
+        temp.log()? * -1.
+    }
+
+    // 测试cross_entropy
+    let y = Tensor::new(&[0u32,2],device)?;
+    let y_hat = Tensor::new(&[[0.1,0.3,0.6],[0.3,0.2,0.5]],device)?;
+    // println!("cross_entropy(y_hat,y)={}", cross_entropy(&y_hat, &y)?);
+    // println!("cross_entropy(y_hat,y)={}", cross_entropy(&net_res, &train_labels, device)?);
+    // println!("cross_entropy(y_hat,y)={}", cross_entropy(&net_res, &y, device)?);
+    fn accuracy(y_hat: &Tensor, y: &Tensor) -> Result<f64> {
+        let dims = y_hat.shape().dims();
+        let y_hat = if dims.len() > 1  && dims[1] > 1 {
+            &(y_hat.argmax(D::Minus1)?)
+        } else {
+            y_hat
+        };
+
+        let cmp = y_hat.to_dtype(y.dtype())?.eq(y)?;
+
+        let sum = cmp.to_dtype(y.dtype())?.sum_all()?.to_dtype(DType::F64)?;
+        Ok(sum.to_scalar::<f64>()?)
+    }
+
+    // println!("accuracy(y_hat, y)/len(y)={}", accuracy(&net_res, &train_labels)?/((&train_labels).elem_count() as f64));
+    /// 累加器
+    #[derive(Debug, Clone)]
+    pub struct Accumulator {
+        data: Vec<f64>,
+    }
+    impl Accumulator {
+        pub fn new(n: usize) -> Self {
+            Accumulator {
+                data: vec![0.0; n],
+            }
+        }
+
+        pub fn add(&mut self, args: &[f64]) {
+            if args.len() != self.data.len() {
+                panic!("The number of arguments must match the length of the data vector.");
+            }
+            for (a, b) in self.data.iter_mut().zip(args) {
+                *a += *b;
+            }
+        }
+
+        pub fn get(&self, idx: usize) -> f64 {
+            *self.data.get(idx).unwrap()
+        }
+        pub fn reset(&mut self) {
+            for a in self.data.iter_mut() {
+                *a = 0.0;
+            }
+        }
+
+
+    }
+    impl Index<usize> for Accumulator {
+        type Output = f64;
+
+        fn index(&self, idx: usize) -> &Self::Output {
+            &self.data[idx]
+        }
+    }
+
+    fn evaluate_accuracy(w: &Tensor, b: &Tensor, net: impl Fn(&Tensor, &Tensor,&Tensor) -> Result<Tensor>, batch: (Tensor, Tensor), device: &Device) -> Result<(f64,f64)> {
+        let X = batch.0;
+        let y = batch.1;
+        let y_hat = net(&X, w, b).unwrap();
+        let accuracy = accuracy(&y_hat, &y).unwrap();
+
+        Ok((accuracy, y.elem_count() as f64))
+    }
+
+    // 测试evaluate_accuracy
+    // 一次性测试
+    // let evaluate_accuracy_res = evaluate_accuracy(&W, &b, net, (train_images.clone(), train_labels.clone()), device)?;
+    // println!("evaluate_accuracy={:?}", evaluate_accuracy_res);
+    // 按照256个数据一个批次进行测试
+    // data_iter(batch_size, &train_images, &train_labels, device, None).iter().for_each(|batches| {
+    //     batches.iter().for_each(|batch| {
+    //         let (X, y) = batch;
+    //         println!("X shape={:?}, y shape={:?}", X.shape(), y.shape());
+    //         let accuracy = evaluate_accuracy(&W, &b, net, (X.clone(),y.clone()), device).unwrap();
+    //         println!("accuracy={:?}", accuracy);
+    //     });
+    // });
+
+    fn updater(batch_size: usize, w: Option<&Tensor>, b: Option<&Tensor>, lr: Option<f64>, device: &Device) -> Result<(SGD)>{
+        let mut varmap = VarMap::new();
+        if w.is_some() {
+            varmap.set_one("w", &w.clone().unwrap())?;
+            if b.is_some() {
+                varmap.set_one("b", &b.clone().unwrap())?;
+            }
+        }
+
+        let train_w = varmap.get((IMAGE_DIM,LABELS), "w", Const(0.), DType::F32, &Device::Cpu)?;
+        let train_b = varmap.get((LABELS), "b", Const(0.), DType::F32, &Device::Cpu)?;
+        let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+
+        let mut sgd = SGD::new(varmap.all_vars(), lr.unwrap_or(0.01));
+        sgd
+    }
+    fn train_epoch_ch3(
+        train_w: &Tensor,
+        train_b: &Tensor,
+        net: impl Fn(&Tensor, &Tensor,&Tensor) -> Result<Tensor>,
+        train_iter: impl Iterator<Item = (Tensor, Tensor)>,
+        loss: impl Fn(&Tensor, &Tensor, &Device) -> Result<Tensor>,
+        is_nested: bool,
+        updater: impl Fn(usize, Option<&Tensor>, Option<&Tensor>, Option<f64>, &Device) -> Result<SGD>,
+        device: &Device,
+    ) -> Result<(f64, f64)> {
+        let mut metric = Accumulator::new(3);
+        let vars = vec![Var::from_tensor(&train_w.clone())?, Var::from_tensor(&train_b.clone())?];
+        for (X, y) in train_iter {
+            let y_hat = net(&X, &train_w, &train_b)?;
+            let l = loss(&y_hat, &y, device)?;
+            if is_nested {
+                let ll = l.mean_all()?.backward()?;
+                let mut optimizer = candle_nn::SGD::new(vars.clone(), 0.01)?;
+                optimizer.step(&ll)?
+            } else {
+                let ll = l.sum_all()?.backward()?;
+                updater(1, Some(&train_w), Some(&train_b), Some(0.01), device)?.step(&ll)?;
+            }
+
+            let sum_all = l.sum_all()?.to_scalar::<f32>()? as f64;
+            let accuracy = accuracy(&y_hat, &y)?;
+            let numl = y.elem_count() as f64;
+            metric.add(&[sum_all, accuracy, numl]);
+        }
+
+        Ok((metric.get(0)/metric.get(2), metric.get(1)/metric.get(2)))
+    }
+    fn train_ch3(
+        train_w: &Tensor,
+        train_b: &Tensor,
+        num_epochs: usize,
+        net: impl Fn(&Tensor, &Tensor,&Tensor) -> Result<Tensor>,
+        train_iter: impl Iterator<Item = (Tensor, Tensor)>,
+        test_iter: impl Iterator<Item = (Tensor, Tensor)>,
+        loss: impl Fn(&Tensor, &Tensor, &Device) -> Result<Tensor>,
+        updater: impl Fn(usize, Option<&Tensor>, Option<&Tensor>, Option<f64>, &Device) -> Result<SGD>,
+        device: &Device,
+    ) -> Result<()> {
+        let mut train_metrics = (0.0, 0.0);
+        let mut test_datas = test_iter.into_iter().map(|batch| {
+            batch
+        }).collect::<Vec<(Tensor, Tensor)>>();
+
+        let train_datas = train_iter.into_iter().map(|batch| {
+            batch
+        }).collect::<Vec<(Tensor, Tensor)>>();
+
+        for epoch in 0..num_epochs {
+            println!("==={epoch}===");
+            train_metrics = train_epoch_ch3(&train_w, &train_b, &net, train_datas.clone().into_iter(), &loss, true, &updater, device)?;
+            let test_acc = evaluate_accuracy(&train_w, &train_b, &net, test_datas.clone().pop().unwrap(), device)?;
+
+            println!("Epoch {:?}, train loss {:?}, train acc {:?}, test acc {:?}",(epoch+1), train_metrics.0, train_metrics.1, test_acc.0);
+        }
+        //
+        println!("train loss {:?}, train acc {:?}", train_metrics.0, train_metrics.1);
+
+        Ok(())
+    }
+
+    // 测试train_ch3
+    let num_epochs = 10;
+    let train_iter = data_iter(batch_size, &train_images, &train_labels, device, None)?;
+    let test_iter = data_iter(batch_size, &test_images, &test_labels, device, None)?;
+
+    // let trains = vec![(train_images, train_labels)];
+    // let tests = vec![(test_images, test_labels)];
+
+    train_ch3(&W, &b, num_epochs, net,
+              train_iter.into_iter(),
+              test_iter.into_iter(),
+              cross_entropy, updater, device)?;
+
+    Ok(())
+}
+
 fn main() {
     let device = Device::Cpu;
-    candle_basic_model_mnist_images_demo(&device);
+    candle_basic_model_fashionmnist_define_demo(&device);
+    // candle_basic_model_fashionmnist_demo(&device);
+    // candle_basic_model_mnist_images_demo(&device);
     //candle_basic_model_ops_demo(&device);
     // candle_basic_modle_sgd_linear_regression_adm_demo(&device);
     // candle_basic_modle_sgd_linear_regression_demo(&device);
