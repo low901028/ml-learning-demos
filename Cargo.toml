@@ -17,14 +17,49 @@ candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.8.
 candle-datasets = { git = "https://github.com/huggingface/candle.git", version = "0.8.4" }
 hf-hub = { version = "0.4.2", features = ["tokio"] }
 parquet = { version = "51.0.0" }
-image = { version = "0.25.2", default-features = true, features = ["jpeg", "png"] }
+image = { version = "0.25.2", default-features = false, features = ["jpeg", "png", "tiff"] }
 flate2={ version = "1.1.0"}
 byteorder = { version = "1.5.0" }
 futures = "0.3.31"
 num_cpus = "1.16.0"
 tokio = "1.44.1"
+anyhow = { version = "1", features = ["backtrace"] }
+clap = { version = "4.2.4", features = ["derive"] }
+
+tiff = { git="https://github.com/image-rs/image-tiff.git", branch = "master"}
+#gdal = { git="https://github.com/georust/gdal.git", tag="v0.18.0"}
+#gdal = { version="0.18.0"}
+#geotiff = { git="https://github.com/georust/geotiff.git", branch = "main"}
+serde_json = "1.0.140"
+#tiff2 = {git="https://github.com/feefladder/tiff2.git", branch = "dev"}
+safetensors = {version = "0.5"}
+
+# torch c++ api binding
+#tch = { version="0.19.0"}
 
 #ndarray="0.16.1"
 #polars= { version = "0.46", features = ["full"] }
 #half = "2.4.1"
 #num-traits = "0.2.19"
+[[bin]]
+name = "basics"
+path = "src/bin/basics/iterator_demos.rs"
+
+[[bin]]
+name = "prithvi_geo"
+path = "src/bin/prithvi/prithvi_geo_candle_demo.rs"
+
+#[env]
+#CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=true
+#PYTHONPATH="/usr/local/lib/python3.11/site-packages:{$PYTHONPATH}"
+#LIBTORCH_USE_PYTORCH=1
+#PATH="/usr/local/Cellar/python@3.11/3.11.11/bin/python3.11:{$PATH}"
+#LIBTORCH="/usr/local/Cellar/pytorch/2.5.1_4/bin"
+#LIBTORCH="/Users/dalan/tools/libtorch"
+#LIBTORCH_INCLUDE="{$LIBTORCH}/include"
+#LIBTORCH_LIB="{$LIBTORCH}/lib"
+#PATH="{$PATH}:{$LIBTORCH}:{$LIBTORCH_INCLUDE}:{$LIBTORCH_LIB}:/usr/local/Cellar/pytorch/2.5.1_4/libexec/bin/python3.13"
+#PYTHON_HOME="/opt/local/Library/Frameworks/Python.framework/Versions/3.11"
+#PATH = "{$PYTHON_HOME}/bin:{$LIBTORCH_LIB}:{$LIBTORCH_INCLUDE}:{$LIBTORCH}/bin:{$PATH}"
+#LIBTORCH_INCLUDE="/usr/local/lib/python3.11/site-packages/torch"
+#LIBTORCH_LIB="/usr/local/lib/python3.11/site-packages/torch"

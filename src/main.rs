@@ -1,3 +1,5 @@
+use std::fs::File;
+use geotiff::GeoTiff;
 use image::{buffer, DynamicImage, GenericImageView, GrayImage, ImageFormat, ImageReader, Rgb, RgbImage};
 use image::imageops::FilterType;
 use parquet::data_type::AsBytes;
@@ -116,9 +118,76 @@ fn vector_nested_demo() {
     let datas = v.into_iter().flatten().flatten().collect::<Vec<i32>>();
     println!("{:?}", datas);
 }
+
+// fn gdal_geotiff_demo() {
+//     use gdal::raster::RasterBand;
+//     use gdal::{Dataset, Metadata};
+//     use std::path::Path;
+//
+//     let dataset = Dataset::open("/Users/dalan/rustspace/ml-learning-demos/prithvi-model/tifs/alaska/Alaska_HLS.S30.T06VUN.2020305T212629.v2.0_cropped.tif").unwrap();
+//     println!("dataset description: {:?}", dataset.description());
+// }
+
+fn geotiff_demo() {
+    use geotiff::GeoTiff;
+    let tiff_file = "/Users/dalan/rustspace/ml-learning-demos/prithvi-model/tifs/alaska/Alaska_HLS.S30.T06VUN.2020305T212629.v2.0_cropped.tif";
+    let path = std::path::PathBuf::from(tiff_file);
+    let geo = GeoTiff::read(std::fs::File::open(&path).expect("File I/O error")).expect("File I/O error");
+    println!("{:?}", geo);
+}
+
+fn test_geotiff_demo() {
+    use std::fs::File;
+    use std::path::PathBuf;
+    use geotiff::GeoTiff;
+    use image::ImageReader;
+    use geotiff::GeoKeyDirectory;
+    use geotiff::RasterType;
+    fn read_geotiff(path: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let img = ImageReader::open(path)?.decode()?;
+        println!("Image dimensions: {:?}", img.dimensions());
+
+        let file = File::open(path)?;
+        let mut reader = GeoTiff::read(file)?;
+        println!("raster size= height={:?} weight={:?}", reader.raster_height, reader.raster_width);
+        println!("samples={:?}", reader.num_samples);
+        println!("geo keys={:?}", reader.geo_key_directory);
+        Ok(())
+    }
+
+    let tiff_file = "/Users/dalan/rustspace/ml-learning-demos/prithvi-model/tifs/alaska/Alaska_HLS.S30.T06VUN.2020305T212629.v2.0_cropped.tif";
+    read_geotiff(tiff_file).unwrap();
+
+}
+fn gettiff2_demo() {
+    use log::{error, info};
+    use std::{collections::BTreeMap, fs, path::Path, time::Instant};
+    use tiff2::{decoder::Decoder, error::TiffResult};
+
+    fn test_tiffs() {
+        let tiff_file = "/Users/dalan/rustspace/ml-learning-demos/prithvi-model/tifs/alaska/Alaska_HLS.S30.T06VUN.2020305T212629.v2.0_cropped.tif";
+        match GeoTiff::read(
+            File::open(tiff_file).expect("could not parse path"),
+        ) {
+            Ok(x) => {
+                println!("great success! {:?}", x);
+            }
+            Err(e) => {
+                println!("Fail! {:?}", e);
+                panic!("Failed at {:?}", e)
+            }
+        };
+    }
+
+    test_tiffs();
+}
 fn main() {
     println!("Hello, world!");
+    gettiff2_demo();
+    // test_geotiff_demo();
+    // geotiff_demo();
+    // gdal_geotiff_demo();
     // vector_nested_demo();
-    draw_bitmap_from_vector();
+    // draw_bitmap_from_vector();
     // plotter_bitmap_demo().unwrap();
 }

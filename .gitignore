@@ -5,3 +5,5 @@
 .DS_Store
 /*mnist*
 /*data*
+/src/bin/basics/
+/prithvi-model/

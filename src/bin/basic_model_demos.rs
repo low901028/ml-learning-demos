@@ -1,11 +1,11 @@
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use candle_core::backprop::GradStore;
-use candle_core::{DType, Device, Error, IndexOp, Module, NdArray, Result, Tensor, Var, D};
+use candle_core::{DType, Device, Error, IndexOp, Module, ModuleT, NdArray, Result, Tensor, Var, D};
 use candle_nn::Init::Const;
 use candle_nn::ops::softmax;
-use candle_nn::{AdamW, Linear, Optimizer, ParamsAdamW, SGD, VarBuilder, VarMap, linear};
+use candle_nn::{AdamW, Linear, Optimizer, ParamsAdamW, SGD, VarBuilder, VarMap, linear, Sequential};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use plotters::prelude::full_palette::PURPLE;
 use plotters::prelude::{BLACK, BLUE, BitMapBackend, ChartBuilder, Circle, Color, DiscreteRanged, EmptyElement, GREEN, IntoDrawingArea, IntoFont, IntoLinspace, IntoSegmentedCoord, LabelAreaPosition, LineSeries, PathElement, PointSeries, RED, Text, WHITE, BitMapElement};
@@ -21,6 +21,8 @@ use byteorder::{BigEndian, ReadBytesExt};
 use candle_core::op::Op;
 use candle_datasets::vision::cifar::load_dir;
 use candle_datasets::vision::Dataset;
+use candle_nn::init::Init;
+use candle_transformers::models::mimi::candle;
 use futures::{StreamExt, TryStreamExt};
 use futures::executor::block_on;
 use plotters::backend::{PixelFormat, RGBPixel};
@@ -1326,7 +1328,7 @@ fn candle_basic_model_fashionmnist_define_demo(device: &Device) -> Result<()> {
 
         Ok((metric.get(0)/metric.get(2), metric.get(1)/metric.get(2)))
     }
-    fn train_ch3(
+    pub(crate) fn train_ch3(
         train_w: &Tensor,
         train_b: &Tensor,
         num_epochs: usize,
@@ -1375,9 +1377,121 @@ fn candle_basic_model_fashionmnist_define_demo(device: &Device) -> Result<()> {
     Ok(())
 }
 
+fn candle_basic_model_fashionmnist_simple_demo(device: &Device) -> Result<()> {
+    let dataset = load_fashion_mnist_gz()?;
+    // 单个batch数据量
+    let batch_size = 256;
+    // train数据集
+    let train_images = dataset.train_images;
+    let train_labels = dataset.train_labels;
+    let train_iter = data_iter(batch_size, &train_images, &train_labels, device, None)?;
+
+    // test数据集
+    let test_images = dataset.test_images;
+    let test_labels = dataset.test_labels;
+    let test_iter = data_iter(batch_size, &test_images, &test_labels, device, None)?;
+
+    let mut varmap = VarMap::new();
+    let vb = VarBuilder::from_varmap(&varmap.clone(), DType::F32, &device);
+
+    let net = candle_nn::sequential::seq()
+        .add(linear::linear(IMAGE_DIM, LABELS, vb.clone())?)
+        ;
+    fn type_of<T>(_: T) -> &'static str {
+        std::any::type_name::<T>()
+    }
+    /// pytorch -> candle
+    ///
+    use candle::{Module, Tensor, Device};
+    use candle_nn::{init, VarBuilder, Linear};
+
+    // 自定义Flatten结构体
+    #[derive(Debug)]
+    pub struct Flatten;
+    impl Flatten {
+        pub fn new() -> Self {
+            Self
+        }
+    }
+    impl Module for Flatten {
+        fn forward(&self, x: &Tensor) -> Result<Tensor> {
+            // // 保持batch维度不变，展平其他维度
+            // let dims = x.dims();
+            // if dims.len() < 2 {
+            //     return Err(Error::Msg("Input tensor must have at least 2 dimensions".into()));
+            // }
+            // let flattened_size: usize = dims[1..].iter().product();
+            // x.reshape((dims[0], flattened_size))
+            x.flatten_all()
+        }
+    }
+    struct Model {
+        flatten: Flatten,
+        linear: Linear,
+    }
+    impl Model {
+        fn new(vb: VarBuilder) -> Result<Self> {
+            let linear = candle_nn::linear(
+                784,
+                10,
+                vb,
+            )?;
+            Ok(Self {
+                flatten: Flatten::new(),
+                linear,
+            })
+        }
+    }
+    impl Module for Model {
+        fn forward(&self, x: &Tensor) -> Result<Tensor> {
+            let x = self.flatten.forward(x)?;
+            self.linear.forward(&x)
+        }
+    }
+
+    let W = Tensor::randn(0.0f32, 0.01, (IMAGE_DIM,LABELS), device)?;
+    let b = Tensor::zeros(LABELS, DType::F32, device)?;
+
+    varmap.set_one("w", W.clone());
+    varmap.set_one("b", b.clone());
+    let net = candle_nn::sequential::seq()
+        .add(Flatten::new())
+        .add(linear::Linear::new(W, Some(b)))
+        // .add_fn(|x| {
+        //     println!("net add_fn: {:?}", x.dtype());
+        //     let normal = Tensor::randn_like(x, 0.0f64, 0.01f64);
+        //     normal
+        // })
+        ;
+    // 使用示例
+    // let device = Device::Cpu;
+    let model = Model::new(vb.clone())?;
+    let loss = candle_nn::loss::cross_entropy(&train_images.to_device(&device)?, &train_labels.to_dtype(DType::U32)?.to_device(&device)?)?;
+    let mut trainer = candle_nn::optim::SGD::new(varmap.to_owned().all_vars(),0.1f64)?;
+    let num_epochs = 10;
+
+    let train_ch3 = |train_w: Option<&Tensor>, train_b: Option<&Tensor>, num_epochs: usize, net: Sequential, train_iter: Tensor, train_label: Tensor,mut updater: SGD| -> Result<()> {
+        for _step in 0..num_epochs {
+            println!("==={}===", _step);
+            println!("train_iter type={:?}", &train_iter.dtype());
+            let ys = model.forward(&train_iter)?;
+            let loss = candle_nn::loss::cross_entropy(&ys, &train_label)?;
+            updater.backward_step(&loss)?
+        }
+        Ok(())
+    };
+
+    train_ch3(None, None, num_epochs, net, train_images, train_labels, trainer)?;
+    println!("{:?}", &varmap.clone().all_vars());
+
+    Ok(())
+}
+
+
 fn main() {
     let device = Device::Cpu;
-    candle_basic_model_fashionmnist_define_demo(&device);
+    candle_basic_model_fashionmnist_simple_demo(&device);
+    // candle_basic_model_fashionmnist_define_demo(&device);
     // candle_basic_model_fashionmnist_demo(&device);
     // candle_basic_model_mnist_images_demo(&device);
     //candle_basic_model_ops_demo(&device);
