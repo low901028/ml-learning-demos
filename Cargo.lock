@@ -130,6 +130,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "approx"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1109,6 +1118,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "gdal"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e721cea67b420fd4b5cb15ba8145f2f1d3a6931a27fdbfadb46cff02015e1cde"
+dependencies = [
+ "bitflags 2.9.0",
+ "chrono",
+ "gdal-sys",
+ "geo-types",
+ "semver",
+ "thiserror 2.0.12",
+]
+
+[[package]]
+name = "gdal-sys"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "febef67dc08a956a9ecb04de2b40dbd15ad56be49421aad9ae0cdcbe9a24166c"
+dependencies = [
+ "pkg-config",
+ "semver",
+]
+
+[[package]]
 name = "gemm"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1343,6 +1376,17 @@ dependencies = [
  "paste",
  "raw-cpuid 11.5.0",
  "seq-macro",
+]
+
+[[package]]
+name = "geo-types"
+version = "0.7.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62ddb1950450d67efee2bbc5e429c68d052a822de3aad010d28b351fbb705224"
+dependencies = [
+ "approx",
+ "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -2072,6 +2116,7 @@ dependencies = [
  "csv",
  "flate2",
  "futures",
+ "gdal",
  "hf-hub",
  "image 0.25.6",
  "log",

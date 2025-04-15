@@ -1397,8 +1397,8 @@ fn candle_basic_model_fashionmnist_simple_demo(device: &Device) -> Result<()> {
     let b = Tensor::zeros(LABELS, DType::F32, device)?;
     let mut varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap.clone(), DType::F32, &device);
-    // varmap.set_one("w", W.clone())?;
-    // varmap.set_one("b", b.clone())?;
+    // varmap.set_one("weight", W.clone())?;
+    // varmap.set_one("bias", b.clone())?;
     // varmap.set([("w", Tensor::randn(0f32, 0.01f32, (IMAGE_DIM, LABELS), &Device::Cpu)?)].into_iter())?;
     // varmap.set([("b", Tensor::ones((), DType::F32, &Device::Cpu)?)].into_iter())?;
 
@@ -1437,6 +1437,7 @@ fn candle_basic_model_fashionmnist_simple_demo(device: &Device) -> Result<()> {
     struct Model {
         flatten: Flatten,
         linear: Linear,
+        is_train: bool,
     }
     impl Model {
         fn new(vb: VarBuilder) -> Result<Self> {
@@ -1448,6 +1449,7 @@ fn candle_basic_model_fashionmnist_simple_demo(device: &Device) -> Result<()> {
             Ok(Self {
                 flatten: Flatten::new(),
                 linear,
+                is_train: true,
             })
         }
     }
@@ -1468,16 +1470,33 @@ fn candle_basic_model_fashionmnist_simple_demo(device: &Device) -> Result<()> {
         ;
     // 使用示例
     // let device = Device::Cpu;
-    let model = Model::new(vb.clone())?;
+    let mut model = Model::new(vb.clone())?;
+    model.is_train = true;
+
     let mut trainer = candle_nn::optim::SGD::new(varmap.to_owned().all_vars(),0.1f64)?;
     let num_epochs = 10;
 
+    let n_batches = train_images.dim(0)? / batch_size;
+    let mut batch_idxs = (0..n_batches).collect::<Vec<usize>>();
+
     for _step in 0..num_epochs {
         println!("==={}===", _step);
-        let ys = model.forward(&train_images)?;
-        let loss = candle_nn::loss::cross_entropy(&ys, &train_labels)?;
-        trainer.backward_step(&loss)?;
+        let mut sum_loss = 0f32;
+        /// 基于candle-core中的narrow来进行随机小批量测试
+        batch_idxs.shuffle(&mut rand::thread_rng());
+        for batch_idx in batch_idxs.iter() {
+            let batch_train_images = train_images.narrow(0, batch_size*batch_idx, batch_size)?;
+            let batch_train_labels = train_labels.narrow(0, batch_size*batch_idx, batch_size)?;
 
+            let ys = model.forward(&batch_train_images)?;
+            let loss = candle_nn::loss::cross_entropy(&ys, &batch_train_labels)?;
+            trainer.backward_step(&loss)?;
+
+            sum_loss += loss.to_vec0::<f32>()?;
+        }
+
+        let avg_loss = sum_loss / n_batches as f32;
+        model.is_train = false;
         let test_ys = model.forward(&test_images)?;
         let sum_ok = test_ys
             .argmax(D::Minus1)?
@@ -1486,7 +1505,7 @@ fn candle_basic_model_fashionmnist_simple_demo(device: &Device) -> Result<()> {
             .sum_all()?
             .to_scalar::<f32>()?;
         let test_accuracy = sum_ok / test_labels.dims1()? as f32;
-        println!("test accuracy: {:?}", test_accuracy);
+        println!("avg_losss={:?}, test accuracy: {:?}", avg_loss, test_accuracy);
     }
     println!("{:?}", &varmap.clone().all_vars());
 

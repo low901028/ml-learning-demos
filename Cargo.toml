@@ -28,7 +28,7 @@ clap = { version = "4.2.4", features = ["derive"] }
 
 tiff = { git="https://github.com/image-rs/image-tiff.git", branch = "master"}
 #gdal = { git="https://github.com/georust/gdal.git", tag="v0.18.0"}
-#gdal = { version="0.18.0"}
+gdal = { version="0.18.0"}
 #geotiff = { git="https://github.com/georust/geotiff.git", branch = "main"}
 serde_json = "1.0.140"
 #tiff2 = {git="https://github.com/feefladder/tiff2.git", branch = "dev"}
