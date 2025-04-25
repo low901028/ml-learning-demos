@@ -29,15 +29,17 @@ clap = { version = "4.2.4", features = ["derive"] }
 tiff = { git="https://github.com/image-rs/image-tiff.git", branch = "master"}
 #gdal = { git="https://github.com/georust/gdal.git", tag="v0.18.0"}
 gdal = { version="0.18.0", features = ["array"]}
-#geotiff = { git="https://github.com/georust/geotiff.git", branch = "main"}
+geotiff = { git="https://github.com/georust/geotiff.git", branch = "main"}
 serde_json = "1.0.140"
-#tiff2 = {git="https://github.com/feefladder/tiff2.git", branch = "dev"}
+tiff2 = {git="https://github.com/feefladder/tiff2.git", branch = "dev"}
 safetensors = {version = "0.5"}
 
 # torch c++ api binding
 #tch = { version="0.19.0"}
 
-#ndarray="0.16.1"
+ndarray= { version="0.16.1", features = ["default"] }
+ndarray-rand = { version = "0.15.0"}
+rand_distr="0.4"
 #polars= { version = "0.46", features = ["full"] }
 #half = "2.4.1"
 #num-traits = "0.2.19"
