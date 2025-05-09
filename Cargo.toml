@@ -31,6 +31,7 @@ tiff = { git="https://github.com/image-rs/image-tiff.git", branch = "master"}
 gdal = { version="0.18.0", features = ["array"]}
 geotiff = { git="https://github.com/georust/geotiff.git", branch = "main"}
 serde_json = "1.0.140"
+serde-pickle = { git="https://github.com/birkenfeld/serde-pickle.git", tag="v1.2.0" }
 tiff2 = {git="https://github.com/feefladder/tiff2.git", branch = "dev"}
 safetensors = {version = "0.5"}
 
@@ -51,6 +52,9 @@ path = "src/bin/basics/iterator_demos.rs"
 name = "prithvi_geo"
 path = "src/bin/prithvi/prithvi_geo_candle_demo.rs"
 
+[[bin]]
+name = "deep_learning"
+path = "src/bin/deep_learning_demos/deep_learning.rs"
 #[env]
 #CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=true
 #PYTHONPATH="/usr/local/lib/python3.11/site-packages:{$PYTHONPATH}"

@@ -1,4 +1,6 @@
 use std::fs::File;
+use candle_core::Device;
+use candle_core::quantized::QMatMul::Tensor;
 use geotiff::GeoTiff;
 use image::{buffer, DynamicImage, GenericImageView, GrayImage, ImageFormat, ImageReader, Rgb, RgbImage};
 use image::imageops::FilterType;
@@ -6,7 +8,7 @@ use parquet::data_type::AsBytes;
 use plotters::backend::{BGRXPixel, BitMapBackend, PixelFormat, RGBPixel};
 use plotters::chart::ChartBuilder;
 use plotters::element::BitMapElement;
-use plotters::prelude::{DrawingBackend, IntoDrawingArea, RED, WHITE};
+use plotters::prelude::{DrawingBackend, IntoDrawingArea, IntoLinspace, RED, WHITE};
 
 fn plotter_bitmap_demo() -> Result<(), Box<dyn std::error::Error>> {
     use plotters::prelude::*;
@@ -181,9 +183,20 @@ fn gettiff2_demo() {
 
     test_tiffs();
 }
+
+fn test_to_scalar_demo() -> candle_core::Result<()>{
+    let device = Device::cuda_if_available(0)?;
+    let datas = candle_core::Tensor::new(&[6u32], &device)?;
+    println!("{},shape rank={:?}", datas, datas.shape().rank());
+    println!("{:?}", datas.to_scalar::<u32>());
+    
+    
+    Ok(())
+}
 fn main() {
     println!("Hello, world!");
-    gettiff2_demo();
+    test_to_scalar_demo().unwrap();
+    // gettiff2_demo();
     // test_geotiff_demo();
     // geotiff_demo();
     // gdal_geotiff_demo();
