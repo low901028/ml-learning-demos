@@ -13,6 +13,7 @@ use clap::builder::Resettable::Reset;
 use futures::StreamExt;
 use image::{DynamicImage, GrayImage};
 use plotters::prelude::{BitMapBackend, ChartBuilder, Color, IntoDrawingArea, IntoFont, LineSeries, PathElement, BLACK, RED, WHITE};
+use serde::Deserialize;
 use serde_pickle::DeOptions;
 use tokio::task::id;
 
@@ -447,17 +448,35 @@ fn load_weight_bais_from_pkl<T: AsRef<std::path::Path>>(dir: T, key: Option<&str
 fn predict(network: &HashMap<&str, Tensor>, x: Tensor) -> Result<Tensor> {
     let (W1, W2, W3) = (network.get("W1").unwrap(),network.get("W2").unwrap(),network.get("W3").unwrap());
     let (b1, b2, b3) = (network.get("b1").unwrap(),network.get("b2").unwrap(),network.get("b3").unwrap());
-    
-    let a1 = Tensor::matmul(&x.clone(), &W1.t()?)?.broadcast_add(b1)?;
+ 
+    let a1 = Tensor::matmul(&x.clone(), &W1)?.broadcast_add(b1)?;
     let z1 = sigmoid(&a1.clone())?;
 
-    let a2 = Tensor::matmul(&z1.clone(), &W2.t()?)?.broadcast_add(b2)?;
+    let a2 = Tensor::matmul(&z1.clone(), &W2)?.broadcast_add(b2)?;
     let z2 = sigmoid(&a2.clone())?;
 
-    let a3 = Tensor::matmul(&z2.clone(), &W3.t()?)?.broadcast_add(b3)?;
+    let a3 = Tensor::matmul(&z2.clone(), &W3)?.broadcast_add(b3)?;
+    // println!("a3={}", a3);
     let y = softmax(&a3.clone(), 1);
     
     y
+}
+
+#[derive(Debug, Deserialize)]
+struct Params {
+    W1: Vec<Vec<f32>>,
+    W2: Vec<Vec<f32>>,
+    W3: Vec<Vec<f32>>,
+
+    b1: Vec<f32>,
+    b2: Vec<f32>,
+    b3: Vec<f32>,
+}
+fn read_params_from_file<P: AsRef<std::path::Path>>(path: P) -> std::result::Result<Params, Box<dyn std::error::Error>> {
+    let buf_reader = BufReader::new(File::open(path)?);
+    let u = serde_json::from_reader(buf_reader)?;
+    // Return the `User`.
+    Ok(u)
 }
 fn deep_learning_demo(device: &Device) -> Result<()> {
     let mnist_datasets = load_fashion_mnist()?;
@@ -467,15 +486,24 @@ fn deep_learning_demo(device: &Device) -> Result<()> {
 
     let dir = "/Users/dalan/rustspace/ml-learning-demos/mnist/pkl";
     let mut network = HashMap::with_capacity(16);
-    /// 权重
-    let pickle_w1 = load_weight_bais_from_pkl(dir, Some("layer1.weight"))?;
-    let pickle_w2 = load_weight_bais_from_pkl(dir, Some("layer2.weight"))?;
-    let pickle_w3 = load_weight_bais_from_pkl(dir, Some("layer3.weight"))?;
-    /// 偏置
-    let pickle_b1 = load_weight_bais_from_pkl(dir, Some("layer1.bias"))?;
-    let pickle_b2 = load_weight_bais_from_pkl(dir, Some("layer2.bias"))?;
-    let pickle_b3 = load_weight_bais_from_pkl(dir, Some("layer3.bias"))?;
-    //
+    let path = "/Users/dalan/rustspace/ml-learning-demos/mnist/pkl/weight_bias.json";
+    let data = read_params_from_file(path).unwrap();
+    
+    // /// 权重
+    // let pickle_w1 = load_weight_bais_from_pkl(dir, Some("layer1.weight"))?;
+    // let pickle_w2 = load_weight_bais_from_pkl(dir, Some("layer2.weight"))?;
+    // let pickle_w3 = load_weight_bais_from_pkl(dir, Some("layer3.weight"))?;
+    // /// 偏置
+    // let pickle_b1 = load_weight_bais_from_pkl(dir, Some("layer1.bias"))?;
+    // let pickle_b2 = load_weight_bais_from_pkl(dir, Some("layer2.bias"))?;
+    // let pickle_b3 = load_weight_bais_from_pkl(dir, Some("layer3.bias"))?;
+    let pickle_w1 = Tensor::from_vec(data.W1.into_iter().flatten().collect::<Vec<f32>>(), (784,50), device)?;
+    let pickle_w2 = Tensor::from_vec(data.W2.into_iter().flatten().collect::<Vec<f32>>(), (50,100), device)?;
+    let pickle_w3 = Tensor::from_vec(data.W3.into_iter().flatten().collect::<Vec<f32>>(), (100,10), device)?;
+    let pickle_b1 = Tensor::from_vec(data.b1, (50,), device)?;
+    let pickle_b2 = Tensor::from_vec(data.b2, (100,), device)?;
+    let pickle_b3 = Tensor::from_vec(data.b3, (10,), device)?;
+    // //
     network.insert("W1", pickle_w1.clone());
     network.insert("W2", pickle_w2.clone());
     network.insert("W3", pickle_w3.clone());
@@ -499,14 +527,18 @@ fn deep_learning_demo(device: &Device) -> Result<()> {
     let mut accuracy_cnt = 0u32;
     let len = train_images.dim(0)?;
     for i in  0..len{
-        let img = train_images.i(i)?.reshape(((), 784))?;
-        let label = train_labels.i(i)?.to_scalar::<u32>()?;
+        let img = train_images.i(i)?.unsqueeze(0)?//.reshape((1,784))?
+            ;
+        let label = train_labels.i(i)?;
         let y = predict(&network, img.clone())?;
         let argmax = y.clone().argmax(1)?;
-        let p = argmax.clone().to_vec1::<u32>()?.get(0).unwrap().clone();
-        if u32::eq(&p, &label)   {
-            accuracy_cnt += 1;
-        }
+
+        let sum = argmax.to_dtype(DType::U32)?.broadcast_eq(&label)?.sum_all()?.to_scalar::<u8>()?;
+        accuracy_cnt += sum as u32;
+        // let p = argmax.clone().to_vec1::<u32>()?.get(0).unwrap().clone();
+        // if u32::eq(&p, &label)   {
+        //     accuracy_cnt += 1;
+        // }
     }
     println!("Accuracy: {:?}, accuracy_cnt={:?}", accuracy_cnt as f32 / len as f32, accuracy_cnt);
     
@@ -519,7 +551,7 @@ fn deep_learning_demo(device: &Device) -> Result<()> {
 
         let y = predict(&network, x_batch.clone())?;
         let argmax = y.clone().argmax(1)?;
-        let sum = argmax.to_dtype(DType::U32)?.broadcast_eq(&label_batch)?.sum_all()?.to_scalar::<u8>()?;
+        let sum = argmax.to_dtype(DType::U32)?.eq(&label_batch)?.sum_all()?.to_scalar::<u8>()?;
         
         accuracy_cnt += sum as u32;
     }

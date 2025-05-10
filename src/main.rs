@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::{BufReader, Read};
 use candle_core::Device;
 use candle_core::quantized::QMatMul::Tensor;
 use geotiff::GeoTiff;
@@ -9,6 +10,8 @@ use plotters::backend::{BGRXPixel, BitMapBackend, PixelFormat, RGBPixel};
 use plotters::chart::ChartBuilder;
 use plotters::element::BitMapElement;
 use plotters::prelude::{DrawingBackend, IntoDrawingArea, IntoLinspace, RED, WHITE};
+use serde::Deserialize;
+use serde_pickle::DeOptions;
 
 fn plotter_bitmap_demo() -> Result<(), Box<dyn std::error::Error>> {
     use plotters::prelude::*;
@@ -193,9 +196,97 @@ fn test_to_scalar_demo() -> candle_core::Result<()>{
     
     Ok(())
 }
+
+fn test_pkl_file_demo() -> anyhow::Result<()> {
+    let file_path = "/Users/dalan/rustspace/ml-learning-demos/mnist/pkl/sample_weight.pkl";
+    // let buf_reader = BufReader::new(File::open(file_path)?);
+    let mut buffer = Box::new(File::open(file_path)?);
+    let decoded: serde_pickle::Value = serde_pickle::from_reader(&mut buffer, DeOptions::new())?;
+    // let bytes = buf_reader.bytes().collect::<Result<Vec<_>, _>>()?;
+    // let pkl = serde_pickle::from_slice(&bytes, DeOptions::new()).unwrap();
+    println!("{:?}", decoded);
+    
+    Ok(())
+}
+
+fn mnist_pkl_file_demo() -> anyhow::Result<()> {
+    use serde::Deserialize;
+    use std::fs::File;
+    use std::io::BufReader;
+    use std::path::Path;
+
+    // 定义 MNIST 数据结构
+    #[derive(Debug, Deserialize, PartialEq)]
+    pub struct MnistData {
+        pub train_images: Vec<Vec<u8>>,
+        pub train_labels: Vec<u8>,
+        pub test_images: Vec<Vec<u8>>,
+        pub test_labels: Vec<u8>,
+    }
+
+    impl MnistData {
+        /// 从 pickle 文件加载 MNIST 数据
+        pub fn load_from_pickle<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+            let file_path = File::open(path.as_ref())?;
+            let mut dataset = serde_pickle::value_from_reader(Box::new(file_path), serde_pickle::DeOptions::new())?;
+            
+            let file = File::open(path)?;
+            let mut reader = BufReader::new(file);
+            let datas: serde_json::Value = serde_json::from_reader(&mut reader).unwrap();
+            let data = serde_pickle::from_reader(&mut reader, serde_pickle::DeOptions::new())?;
+            Ok(data)
+        }
+
+        /// 获取训练样本数量
+        pub fn train_len(&self) -> usize {
+            self.train_images.len()
+        }
+
+        /// 获取测试样本数量
+        pub fn test_len(&self) -> usize {
+            self.test_images.len()
+        }
+    }
+
+    const TEST_PKL: &str = "/Users/dalan/rustspace/ml-learning-demos/mnist/pkl/sample_weight.pkl";
+
+    let mnist = MnistData::load_from_pickle(TEST_PKL).expect("Failed to load MNIST data");
+
+
+    Ok(())
+}
+
+fn pkl_json_file_demo() -> anyhow::Result<()> {
+    #[derive(Debug, Deserialize)]
+    struct Params {
+        W1: Vec<Vec<f32>>,
+        W2: Vec<Vec<f32>>,
+        W3: Vec<Vec<f32>>,
+        
+        b1: Vec<f32>,
+        b2: Vec<f32>,
+        b3: Vec<f32>,
+    }
+    fn read_params_from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Params, Box<dyn std::error::Error>> {
+        let buf_reader = BufReader::new(File::open(path)?);
+        let u = serde_json::from_reader(buf_reader)?;
+        // Return the `User`.
+        Ok(u)
+    }
+
+    let path = "/Users/dalan/rustspace/ml-learning-demos/mnist/pkl/weight_bias.json";
+    let data = read_params_from_file(path).unwrap();
+    println!("{:?}", data);
+    
+    Ok(())
+}
+
 fn main() {
     println!("Hello, world!");
-    test_to_scalar_demo().unwrap();
+    pkl_json_file_demo().unwrap();
+    // mnist_pkl_file_demo().unwrap();
+    // test_pkl_file_demo().unwrap();
+    // test_to_scalar_demo().unwrap();
     // gettiff2_demo();
     // test_geotiff_demo();
     // geotiff_demo();
