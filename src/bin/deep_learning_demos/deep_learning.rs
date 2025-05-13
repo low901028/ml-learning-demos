@@ -3,9 +3,7 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::iter::Map;
 use std::ops::{Add, Mul};
-use candle_core::{Result, Tensor, Device, Module, DType, CustomOp1, Layout, Shape, StreamTensor, WithDType, D, IndexOp, pickle};
-use candle_core::pickle::{read_pth_tensor_info, TensorInfo};
-use candle_core::quantized::QMatMul::TensorF16;
+use candle_core::{Result, Tensor, Device, Module, DType, CustomOp1, Layout, Shape, StreamTensor, WithDType, D, IndexOp, pickle, Var};
 use candle_datasets::vision::Dataset;
 use candle_nn::ops::{sigmoid, softmax};
 use clap::arg;
@@ -13,6 +11,7 @@ use clap::builder::Resettable::Reset;
 use futures::StreamExt;
 use image::{DynamicImage, GrayImage};
 use plotters::prelude::{BitMapBackend, ChartBuilder, Color, IntoDrawingArea, IntoFont, LineSeries, PathElement, BLACK, RED, WHITE};
+use rand::prelude::SliceRandom;
 use serde::Deserialize;
 use serde_pickle::DeOptions;
 use tokio::task::id;
@@ -448,7 +447,7 @@ fn load_weight_bais_from_pkl<T: AsRef<std::path::Path>>(dir: T, key: Option<&str
 fn predict(network: &HashMap<&str, Tensor>, x: Tensor) -> Result<Tensor> {
     let (W1, W2, W3) = (network.get("W1").unwrap(),network.get("W2").unwrap(),network.get("W3").unwrap());
     let (b1, b2, b3) = (network.get("b1").unwrap(),network.get("b2").unwrap(),network.get("b3").unwrap());
- 
+
     let a1 = Tensor::matmul(&x.clone(), &W1)?.broadcast_add(b1)?;
     let z1 = sigmoid(&a1.clone())?;
 
@@ -458,7 +457,7 @@ fn predict(network: &HashMap<&str, Tensor>, x: Tensor) -> Result<Tensor> {
     let a3 = Tensor::matmul(&z2.clone(), &W3)?.broadcast_add(b3)?;
     // println!("a3={}", a3);
     let y = softmax(&a3.clone(), 1);
-    
+
     y
 }
 
@@ -488,7 +487,7 @@ fn deep_learning_demo(device: &Device) -> Result<()> {
     let mut network = HashMap::with_capacity(16);
     let path = "/Users/dalan/rustspace/ml-learning-demos/mnist/pkl/weight_bias.json";
     let data = read_params_from_file(path).unwrap();
-    
+
     // /// 权重
     // let pickle_w1 = load_weight_bais_from_pkl(dir, Some("layer1.weight"))?;
     // let pickle_w2 = load_weight_bais_from_pkl(dir, Some("layer2.weight"))?;
@@ -510,7 +509,7 @@ fn deep_learning_demo(device: &Device) -> Result<()> {
     network.insert("b1", pickle_b1.clone());
     network.insert("b2", pickle_b2.clone());
     network.insert("b3", pickle_b3.clone());
-    
+
     // println!("pickle_w1={:?}", pickle_w1);
     /// 测试
     // let img = train_images.i(1)?;
@@ -541,7 +540,7 @@ fn deep_learning_demo(device: &Device) -> Result<()> {
         // }
     }
     println!("Accuracy: {:?}, accuracy_cnt={:?}", accuracy_cnt as f32 / len as f32, accuracy_cnt);
-    
+
     let batch_size = 100;
     accuracy_cnt = 0u32;
     let batches = len / batch_size;
@@ -552,19 +551,175 @@ fn deep_learning_demo(device: &Device) -> Result<()> {
         let y = predict(&network, x_batch.clone())?;
         let argmax = y.clone().argmax(1)?;
         let sum = argmax.to_dtype(DType::U32)?.eq(&label_batch)?.sum_all()?.to_scalar::<u8>()?;
-        
+
         accuracy_cnt += sum as u32;
     }
 
     println!("[Batch] Accuracy: {:?}, accuracy_cnt={:?}", accuracy_cnt as f32 / len as f32, accuracy_cnt);
+
+    Ok(())
+}
+
+fn deep_learning_v2_demo(device: &Device) -> Result<()> {
+    fn mean_squared_error(y: Tensor, t: Tensor) -> Result<Tensor> {
+        Tensor::sum(&(y-t.to_dtype(DType::F32)?)?.sqr()?, 0)? / 2f64
+        // (y-t)?.sqr()?.mean_all()
+    }
+
+    fn cross_entropy_error(y: Tensor, t: Tensor) -> Result<Tensor> {
+        let (y, t) = if y.dims().len() == 1 {
+            (y.clone().reshape((1, y.clone().elem_count()))? , t.clone().reshape((1, t.clone().elem_count()))?) 
+        } else {
+            (y, t.clone())
+        };
+        
+        let batch_size = y.dims()[0];
+        let delta = 1e-7;
+        (t.to_dtype(DType::F32)? * ((y+delta)?.log()?))?.sum_all()?.neg()? / batch_size as f64
+        // candle_nn::loss::cross_entropy(&y.unsqueeze(0)?.t()?, &t)
+    }
+    /**
+    let t = Tensor::new(&[0u32,0,1,0,0,0,0,0,0,0], device)?.to_dtype(DType::U32)?;
+    let y = Tensor::new(&[0.1, 0.05, 0.6, 0.0, 0.05, 0.1, 0.0, 0.1, 0.0, 0.0], device)?.to_dtype(DType::F32)?;
+    let mse = mean_squared_error(y.clone(), t.clone())?;
+    let cross_entropy = cross_entropy_error(y.clone(), t.clone())?;
+    println!("Mean squared error: {:?}", mse);
+    println!("Cross entropy error: {:?}", cross_entropy);
+
+    let y = Tensor::new(&[0.1,0.05,0.1,0.0,0.05,0.1,0.0,0.6,0.0,0.0], device)?.to_dtype(DType::F32)?;
+    let mse = mean_squared_error(y.clone(), t.clone())?;
+    let cross_entropy = cross_entropy_error(y.clone(), t.clone())?;
+    println!("Mean squared error: {:?}", mse);
+    println!("Cross entropy error: {:?}", cross_entropy);
+   */
+
+    let mnist_datasets = load_fashion_mnist()?;
+    let train_images = mnist_datasets.train_images;
+    let train_labels = mnist_datasets.train_labels;
+    let train_labels = train_labels.to_device(device)?.to_dtype(DType::U32)?;
+
+    let test_images = mnist_datasets.test_images;
+    let test_labels = mnist_datasets.test_labels;
+    let test_labels = test_labels.to_device(device)?.to_dtype(DType::U32)?;
+    println!("t_train_i_2={}", train_labels.gather(&Tensor::new(&[0u32,1], device)?, 0)?);
+
+    /// 进行one-hot处理
+    // depth 指定one-shot时 根据当前label的值将对应匹配位置置为1，其他位置为0
+    // 比如将[9, 0] -> [[0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    //                 [1, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
+    let depth = mnist_datasets.labels;
+    let on_value = 1;
+    let off_value = 0;
+    let train_labels = candle_nn::encoding::one_hot::<u32>(train_labels, depth, on_value, off_value)?;
+    println!("x_train.shape={:?}, t_train.shape={:?};i_2={}", train_images.shape(), train_labels.shape(), train_labels.i(..2)?);
+
+
+    let train_size = train_images.dim(0)? as u32;
+    let batch_size = 10;
+    
+    /// 随机选择batch_size行记录
+    let train_idxs = (0..train_size).collect::<Vec<_>>();
+    let idxs = train_idxs
+        .choose_multiple(&mut rand::thread_rng(), batch_size);
+    let idxs_tensor = Tensor::from_iter(idxs.cloned().into_iter(),device)?
+        .unsqueeze(1)?;
+    println!("current train_idxs={}", &idxs_tensor);
+    let x_batch = train_images.gather(&idxs_tensor.repeat((1, 784))?,  0)?;
+    let t_batch = train_labels.gather(&idxs_tensor.repeat((1, 10))?,  0)?;
+    println!("[batch] train data: image={}, label={}",  x_batch, t_batch);
+    // 按批随机选择
+    // let n_batches =  train_size / batch_size;
+    // let mut batch_idxs = (0..n_batches).collect::<Vec<usize>>();
+    // batch_idxs.shuffle(&mut rand::thread_rng());
+    // for batch_idx in batch_idxs.iter() {
+    //     let batch_train_images = train_images.narrow(0, batch_size * batch_idx, batch_size)?;
+    //     let batch_train_labels = train_labels.narrow(0, batch_size * batch_idx, batch_size)?;
+    //
+    //     println!("batch mask-train-images_shape:{:?}, label={:?}", batch_train_images.shape(), batch_train_labels.shape());
+    // }
+    
+    /// 求导函数
+    /// 求导公式与下面的实现存在差异
+    /// df(x)/dx = [f(x+h)-f(x)]/h 存在在实现的时候，存在舍入误差，导致结果出现“偏差”
+    /// 故而选择以x为中心，左右间距h，这样可以计算x左右差分误差
+    /// 
+    fn numerical_diff(f: impl Fn(Tensor) -> Result<Tensor>, x: Tensor) -> Result<Tensor> {
+        let h = 1e-4; // 0.0001
+        // f(x+h) -f(x-h) / (2*h)
+        (f((x.clone()+h)?)? - f((x.clone()-h)?)?)? / (2f64*h)
+    }
+    
+    /// 可以定义任意函数
+    // y = 0.01x^2 + 0.1x
+    fn function_1(x: Tensor) -> Result<Tensor> {
+        (Tensor::sqr(&x)? * 0.01f64)? + (0.1f64 * x)?
+    }
+
+    let x = Tensor::arange_step(0.0f32, 20.0, 0.1, device)?;
+    let y = function_1(x.clone())?;
+    draw_preceptron(&x, &y)?;
+    
+    // 导数=0.01 * 2 * x + 0.1
+    // 5->导数=0.2； 10->导数=0.3
+    let local = Tensor::new(&[5u32, 10], device)?.to_dtype(DType::F32)?;
+    let result  = numerical_diff(function_1, local.clone())?;
+    println!("numerical_diff[5,10]={}", result);
+    
+    // f(x0, x1) = x0^2 + x1^2
+    fn function_2(x: Tensor) -> Result<Tensor> {
+        x.sqr()?.sum_all()
+    }
+    
+    // x0=3, x1=4时，求x0的偏导数
+    fn function_tmp1(x0: Tensor) -> Result<Tensor> {
+        x0.sqr()? + 4.0f64 * 4.0
+    }
+    let datas = Tensor::new(&[3.0f32], device)?.to_dtype(DType::F32)?;
+    println!("function_tmp1(x0)={}", numerical_diff(function_tmp1, datas.clone())?);
+    
+    // x0=3， x1=4的导数
+    fn function_tmp2(x1: Tensor) -> Result<Tensor> {
+        x1.sqr()? + 3.0f64 * 3.0
+    }
+    let datas = Tensor::new(&[4.0f32], device)?.to_dtype(DType::F32)?;
+    println!("function_tmp1(x0)={}", numerical_diff(function_tmp2, datas.clone())?);
+    
+    fn numerical_gradient(f: impl Fn(Tensor) -> Result<Tensor>, x: Tensor) -> Result<Tensor> {
+        let h = 1e-4;
+        
+        let x_size = x.dims()[0];
+        let mut datas: Vec<Tensor> = Vec::with_capacity(x_size);
+        
+        for idx in 0..x_size {
+            let tmp_val = x.i(idx)?;
+            // f(x+h)的计算
+            let x_idx_add_h = (tmp_val.clone() + h.clone())?;
+            let fxh1 = f(x_idx_add_h.clone())?;
+            
+            // f(x-h)的计算
+            let x_idx_sub_h = (tmp_val.clone() - h.clone())?;
+            let fxh2 = f(x_idx_sub_h.clone())?;
+
+            let idx_grad = ((fxh1.clone() - fxh2.clone())? / (2f64*h))?; 
+            datas.push(idx_grad.reshape((1,1))?);
+        }
+        
+        Tensor::cat(&datas, 0)
+    }
+    
+    let points = Tensor::new(&[3.0f32, 4.0, 0.0, 2.0, 3.0, 0.0], device)?.to_dtype(DType::F32)?;
+    let result = numerical_gradient(function_2, points.clone().reshape(((),1))?)?;
+    println!("function_tmp2(x0=3.0, x1=4.0)={}", result);
     
     Ok(())
 }
 
+
 fn main() {
     println!("deep learning get started...");
     let device = Device::cuda_if_available(0).unwrap();
-    deep_learning_demo(&device).unwrap();
+    deep_learning_v2_demo(&device).unwrap();
+    // deep_learning_demo(&device).unwrap();
     // multiply_preceptron_demo(&device).unwrap();
     // naive_perceptron_demo(&device).unwrap();
 }
