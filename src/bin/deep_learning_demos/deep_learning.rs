@@ -710,7 +710,42 @@ fn deep_learning_v2_demo(device: &Device) -> Result<()> {
     let points = Tensor::new(&[3.0f32, 4.0, 0.0, 2.0, 3.0, 0.0], device)?.to_dtype(DType::F32)?;
     let result = numerical_gradient(function_2, points.clone().reshape(((),1))?)?;
     println!("function_tmp2(x0=3.0, x1=4.0)={}", result);
+
+    /// 梯度下降简单实现
+    fn gradient_descent(f: impl Fn(Tensor)-> Result<Tensor>, init_x: Tensor, lr: f64, step_num: i32) -> Result<Tensor> {
+        let x = Var::from_tensor(&init_x.clone())?;
+        
+        let ff = Box::new(f);
+        let xx = x.clone();
+       
+        /// 1、迭代变更grad的值
+        /// 2、使用numerical_gradient进行梯度计算，得到当前的梯度gradient
+        /// 3、结合learning rate来变更当前的gradient
+        /// 4、将最新的gradient进行变更，并将最新梯度tensor输出
+        /// 5、待到迭代完成获取所有迭代结果中最新的那个即为所需的梯度
+        let mut grad = (0.. step_num).into_iter().map(move |idx| {
+            let  grad = numerical_gradient(ff.as_ref(), xx.clone().as_tensor().clone()).unwrap();
+            let tmp_x = (xx.as_tensor().clone() - (grad * lr).unwrap()).unwrap();
+            xx.set(&tmp_x.clone()).unwrap();
+            // println!("current grad: {}", tmp_x.clone());
+            xx.as_detached_tensor()
+        }).collect::<Vec<_>>();
+        
+        let grad_desc = grad.pop().unwrap().clone();
+        Ok(grad_desc)
+    }
     
+    /// 梯度下降简单应用
+    let init_x = Tensor::new(&[-3.0f32, 4.0], device)?.to_dtype(DType::F32)?;
+    let grad_desc = gradient_descent(function_2, init_x.clone().reshape(((),1))?, 0.1, 100)?;
+    println!("grad desc(lr=0.1, step=100) ={}", grad_desc);
+
+    let grad_desc = gradient_descent(function_2, init_x.clone().reshape(((),1))?, 10.0, 100)?;
+    println!("grad desc(lr=10.0, step=100) ={}", grad_desc);
+
+    let grad_desc = gradient_descent(function_2, init_x.clone().reshape(((),1))?, 1e-10, 100)?;
+    println!("grad desc(lr=1e-10, step=100) ={}", grad_desc);
+
     Ok(())
 }
 
