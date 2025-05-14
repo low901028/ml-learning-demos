@@ -4,8 +4,9 @@ use std::io::{BufReader, Read};
 use std::iter::Map;
 use std::ops::{Add, Mul};
 use candle_core::{Result, Tensor, Device, Module, DType, CustomOp1, Layout, Shape, StreamTensor, WithDType, D, IndexOp, pickle, Var};
+use candle_core::scalar::TensorOrScalar;
 use candle_datasets::vision::Dataset;
-use candle_nn::ops::{sigmoid, softmax};
+use candle_nn::ops::{sigmoid};
 use clap::arg;
 use clap::builder::Resettable::Reset;
 use futures::StreamExt;
@@ -218,14 +219,42 @@ fn draw_preceptron(x: &Tensor, y: &Tensor) -> Result<()>{
 
     Ok(())
 }
+
+fn sigmod(x: Tensor) -> Result<Tensor>{
+    // 1.0 / (1.0 + Tensor::exp(&x.neg()?)?)?
+    // (1.0 + Tensor::exp(&x.neg()?)?)?.recip()
+    (&x.neg()?.exp()? + 1.0)?.recip()
+}
+
+fn step_function(x: &Tensor, device: &Device) -> Result<Tensor> {
+    // let res = if x.sum_all()?.to_scalar::<f32>()?.le(&0f32) {
+    //      0
+    //  } else {
+    //      1
+    //  };
+    //
+    //  Tensor::new(&[res as u8], device)
+    let y =  x.gt(0.0)?.to_dtype(DType::U32);
+    y
+}
+
+///
+/// exp(x-c) / sum(exp(x-c))
+/// 因exp函数单调递增，故而存在“溢出”的问题，输出：INF
+/// 通过减去输入集中最大的元素，降低溢出风险
+///
+fn softmax(x: Tensor) -> Result<Tensor> {
+    let c = x.max_all()?;
+    let exp_a = x.clone().broadcast_sub(&c.clone())?.exp()?;
+    let sum_exp_a= exp_a.clone().sum_all()?;
+    let y = exp_a.clone().broadcast_div(&sum_exp_a.clone())?;
+
+    Ok(y)
+}
 /// 多层网络
 fn multiply_preceptron_demo(device: &Device) -> Result<()> {
     /// 自定义实现sigmoid
-    fn sigmod(x: Tensor) -> Result<Tensor>{
-       // 1.0 / (1.0 + Tensor::exp(&x.neg()?)?)?
-       // (1.0 + Tensor::exp(&x.neg()?)?)?.recip()
-       (&x.neg()?.exp()? + 1.0)?.recip()
-    }
+
     let candle_sigmoid = candle_nn::Activation::Sigmoid;
 
     let x = Tensor::from_slice(&[1.0, 2.0], (2,), device)?;
@@ -234,18 +263,6 @@ fn multiply_preceptron_demo(device: &Device) -> Result<()> {
 
     let sigmoid_x = candle_sigmoid.forward(&x.clone())?;
     println!("candle_nn_sigmoid_[1.0, 2.0]: {}", sigmoid_x);
-
-    fn step_function(x: &Tensor, device: &Device) -> Result<Tensor> {
-       // let res = if x.sum_all()?.to_scalar::<f32>()?.le(&0f32) {
-       //      0
-       //  } else {
-       //      1
-       //  };
-       //
-       //  Tensor::new(&[res as u8], device)
-       let y =  x.gt(0.0)?.to_dtype(DType::U32);
-       y
-    }
 
     let result = step_function(&Tensor::new(&[3.0], device)?.to_dtype(DType::F32)?, device)?;
     println!("step_function_[3.0]: {}", result);
@@ -374,20 +391,6 @@ fn multiply_preceptron_demo(device: &Device) -> Result<()> {
     let y = forward(network, &x, &device)?;
     println!("y={:.}", y);
 
-    ///
-    /// exp(x-c) / sum(exp(x-c))
-    /// 因exp函数单调递增，故而存在“溢出”的问题，输出：INF
-    /// 通过减去输入集中最大的元素，降低溢出风险
-    ///
-    fn softmax(x: Tensor) -> Result<Tensor> {
-        let c = x.max_all()?;
-        let exp_a = x.clone().broadcast_sub(&c.clone())?.exp()?;
-        let sum_exp_a= exp_a.clone().sum_all()?;
-        let y = exp_a.clone().broadcast_div(&sum_exp_a.clone())?;
-
-        Ok(y)
-    }
-
     let candle_softmax = candle_nn::ops::softmax;
     let x = Tensor::new(&[[0.3f32, 2.9, 4.0]], device)?;
     let exp_a = Tensor::exp(&x.clone())?;
@@ -456,7 +459,7 @@ fn predict(network: &HashMap<&str, Tensor>, x: Tensor) -> Result<Tensor> {
 
     let a3 = Tensor::matmul(&z2.clone(), &W3)?.broadcast_add(b3)?;
     // println!("a3={}", a3);
-    let y = softmax(&a3.clone(), 1);
+    let y = candle_nn::ops::softmax(&a3.clone(), 1);
 
     y
 }
@@ -560,24 +563,51 @@ fn deep_learning_demo(device: &Device) -> Result<()> {
     Ok(())
 }
 
+
+fn numerical_gradient(f: impl Fn(Tensor) -> Result<Tensor>, x: Tensor) -> Result<Tensor> {
+    let h = 1e-4;
+
+    let x_size = x.dims()[0];
+    let mut datas: Vec<Tensor> = Vec::with_capacity(x_size);
+
+    for idx in 0..x_size {
+        let tmp_val = x.i(idx)?;
+        // f(x+h)的计算
+        let x_idx_add_h = (tmp_val.clone() + h.clone())?;
+        let fxh1 = f(x_idx_add_h.clone())?;
+
+        // f(x-h)的计算
+        let x_idx_sub_h = (tmp_val.clone() - h.clone())?;
+        let fxh2 = f(x_idx_sub_h.clone())?;
+
+        let idx_grad = ((fxh1.clone() - fxh2.clone())? / (2f64*h))?;
+        // println!("current_grad={}", idx_grad);
+        datas.push(idx_grad.reshape((1,1))?);
+    }
+
+    Tensor::cat(&datas, 0)
+}
+
+fn cross_entropy_error(y: Tensor, t: Tensor) -> Result<Tensor> {
+    let (y, t) = if y.dims().len() == 1 {
+        (y.clone().reshape((1, y.clone().elem_count()))? , t.clone().reshape((1, t.clone().elem_count()))?)
+    } else {
+        (y, t.clone())
+    };
+
+    let batch_size = y.dims()[0];
+    let delta = 1e-7;
+    (t.to_dtype(DType::F32)? * ((y+delta)?.log()?))?.sum_all()?.neg()? / batch_size as f64
+    // candle_nn::loss::cross_entropy(&y.unsqueeze(0)?.t()?, &t)
+}
+
 fn deep_learning_v2_demo(device: &Device) -> Result<()> {
     fn mean_squared_error(y: Tensor, t: Tensor) -> Result<Tensor> {
         Tensor::sum(&(y-t.to_dtype(DType::F32)?)?.sqr()?, 0)? / 2f64
         // (y-t)?.sqr()?.mean_all()
     }
 
-    fn cross_entropy_error(y: Tensor, t: Tensor) -> Result<Tensor> {
-        let (y, t) = if y.dims().len() == 1 {
-            (y.clone().reshape((1, y.clone().elem_count()))? , t.clone().reshape((1, t.clone().elem_count()))?) 
-        } else {
-            (y, t.clone())
-        };
-        
-        let batch_size = y.dims()[0];
-        let delta = 1e-7;
-        (t.to_dtype(DType::F32)? * ((y+delta)?.log()?))?.sum_all()?.neg()? / batch_size as f64
-        // candle_nn::loss::cross_entropy(&y.unsqueeze(0)?.t()?, &t)
-    }
+
     /**
     let t = Tensor::new(&[0u32,0,1,0,0,0,0,0,0,0], device)?.to_dtype(DType::U32)?;
     let y = Tensor::new(&[0.1, 0.05, 0.6, 0.0, 0.05, 0.1, 0.0, 0.1, 0.0, 0.0], device)?.to_dtype(DType::F32)?;
@@ -683,30 +713,7 @@ fn deep_learning_v2_demo(device: &Device) -> Result<()> {
     }
     let datas = Tensor::new(&[4.0f32], device)?.to_dtype(DType::F32)?;
     println!("function_tmp1(x0)={}", numerical_diff(function_tmp2, datas.clone())?);
-    
-    fn numerical_gradient(f: impl Fn(Tensor) -> Result<Tensor>, x: Tensor) -> Result<Tensor> {
-        let h = 1e-4;
-        
-        let x_size = x.dims()[0];
-        let mut datas: Vec<Tensor> = Vec::with_capacity(x_size);
-        
-        for idx in 0..x_size {
-            let tmp_val = x.i(idx)?;
-            // f(x+h)的计算
-            let x_idx_add_h = (tmp_val.clone() + h.clone())?;
-            let fxh1 = f(x_idx_add_h.clone())?;
-            
-            // f(x-h)的计算
-            let x_idx_sub_h = (tmp_val.clone() - h.clone())?;
-            let fxh2 = f(x_idx_sub_h.clone())?;
 
-            let idx_grad = ((fxh1.clone() - fxh2.clone())? / (2f64*h))?; 
-            datas.push(idx_grad.reshape((1,1))?);
-        }
-        
-        Tensor::cat(&datas, 0)
-    }
-    
     let points = Tensor::new(&[3.0f32, 4.0, 0.0, 2.0, 3.0, 0.0], device)?.to_dtype(DType::F32)?;
     let result = numerical_gradient(function_2, points.clone().reshape(((),1))?)?;
     println!("function_tmp2(x0=3.0, x1=4.0)={}", result);
@@ -714,10 +721,10 @@ fn deep_learning_v2_demo(device: &Device) -> Result<()> {
     /// 梯度下降简单实现
     fn gradient_descent(f: impl Fn(Tensor)-> Result<Tensor>, init_x: Tensor, lr: f64, step_num: i32) -> Result<Tensor> {
         let x = Var::from_tensor(&init_x.clone())?;
-        
+
         let ff = Box::new(f);
         let xx = x.clone();
-       
+
         /// 1、迭代变更grad的值
         /// 2、使用numerical_gradient进行梯度计算，得到当前的梯度gradient
         /// 3、结合learning rate来变更当前的gradient
@@ -730,11 +737,11 @@ fn deep_learning_v2_demo(device: &Device) -> Result<()> {
             // println!("current grad: {}", tmp_x.clone());
             xx.as_detached_tensor()
         }).collect::<Vec<_>>();
-        
+
         let grad_desc = grad.pop().unwrap().clone();
         Ok(grad_desc)
     }
-    
+
     /// 梯度下降简单应用
     let init_x = Tensor::new(&[-3.0f32, 4.0], device)?.to_dtype(DType::F32)?;
     let grad_desc = gradient_descent(function_2, init_x.clone().reshape(((),1))?, 0.1, 100)?;
@@ -746,14 +753,235 @@ fn deep_learning_v2_demo(device: &Device) -> Result<()> {
     let grad_desc = gradient_descent(function_2, init_x.clone().reshape(((),1))?, 1e-10, 100)?;
     println!("grad desc(lr=1e-10, step=100) ={}", grad_desc);
 
+    #[derive(Clone)]
+    struct SimpleNet {
+        W: Tensor,
+    }
+
+    impl SimpleNet {
+        fn _init_(device: &Device) -> Self {
+            SimpleNet {
+                // W: Tensor::new(&[[0.47355232f32, 0.9977393, 0.84668094],[0.85557411, 0.03563661, 0.69422093]], device).unwrap(),
+                W: Tensor::randn(0.0f32, 1.0, (2,3), device).unwrap(),
+            }
+        }
+
+        fn predict(self, x: Tensor) -> Result<Tensor> {
+            x.broadcast_matmul(&self.W)
+        }
+
+        fn loss(self, x: Tensor, t: Tensor) -> Result<Tensor> {
+            let z = self.predict(x)?;
+
+            /// ================================================
+            /// canndle_nn中的softmax 和 自定义cross_entropy_error
+            /// ================================================
+            let y = softmax(z)?;
+            let loss = cross_entropy_error(y, t);
+
+            loss
+        }
+    }
+
+    let net = SimpleNet::_init_(&device);
+    println!("init weight:{}", net.W);
+
+    let x = Tensor::new(&[[0.6,  0.9]], device)?.to_dtype(DType::F32)?;
+    let p = net.clone().predict(x.clone())?;
+    println!("predict weight:{}", p);
+    let max_idx = p.argmax(1)?;
+    println!("max_idx={}", max_idx);
+
+    let depth = 3;
+    let on_value = 1;
+    let off_value = 0;
+    let t = candle_nn::encoding::one_hot::<u32>(max_idx, depth, on_value, off_value)?;
+    println!("one_hot_value={}", t);
+
+    let t = Tensor::new(&[[0u32, 0, 1]],device )?;
+    let loss = net.clone().loss(x.clone(), t.clone())?;
+    println!("loss function={}", loss);
+
+    let xx = x.clone();
+    let tt = t.clone();
+    let net_loss = net.clone();
+    let f: Box<dyn Fn(Tensor)-> Result<Tensor> > = Box::new(|w| -> Result<Tensor> {
+        let r = net_loss.clone().loss(xx.clone(), tt.clone())?;
+        Ok(r)
+    });
+
+    let W = net.clone().W.reshape(((),1))?;
+    let dW = numerical_gradient(f, W)?.reshape(net.W.shape())?;
+    println!("dW_grad={}", dW);
+
     Ok(())
 }
 
+fn deep_learning_twolayer_net_demo(device: &Device) -> Result<()> {
+    #[derive(Clone)]
+    struct TwoLayerNet {
+        params: HashMap<&'static str, Tensor>,
+    }
+
+    impl TwoLayerNet {
+        fn _init_(input_size: usize,
+                  hidden_size: usize,
+                  output_size: usize,
+                  weighted_init_std: f64,
+                  device: &Device
+        ) -> Result<TwoLayerNet> {
+            let mut net = TwoLayerNet {
+                params: HashMap::with_capacity(8),
+            };
+
+            /// 初始化weight 和 bias
+            net.params.insert("W1",(Tensor::randn(0f32, 1f32, (input_size, hidden_size), device)? * weighted_init_std)?);
+            net.params.insert("b1",Tensor::zeros(hidden_size, DType::F32, device)? );
+
+            net.params.insert("W2",(Tensor::randn(0f32, 1f32, (hidden_size, output_size), device)? * weighted_init_std)?);
+            net.params.insert("b2",Tensor::zeros(output_size, DType::F32, device)? );
+
+            Ok(net)
+        }
+
+        fn predict(self, x: Tensor) -> Result<Tensor> {
+            let (W1, W2) = (self.params["W1"].clone(), self.params["W2"].clone());
+            let (b1, b2) = (self.params["b1"].clone(), self.params["b2"].clone());
+
+            let a1 = x.clone().matmul(&W1)?.broadcast_add(&b1)?;
+            let z1 = candle_nn::activation::Activation::Sigmoid.forward(&a1)?;
+            let a2 = z1.matmul(&W2)?.broadcast_add(&b2)?;
+            let y = candle_nn::ops::softmax(&a2, 1);
+
+            y
+        }
+
+        fn loss(self, x: Tensor, t: Tensor) -> Result<Tensor> {
+            let y = self.predict(x)?;
+            // cross_entropy_error(y, t)
+            candle_nn::loss::cross_entropy(&y, &t)
+        }
+
+        fn accuracy(self, x: Tensor, t: Tensor) -> Result<f64> {
+            let  y = self.predict(x.clone())?;
+            let y = y.argmax(1)?;
+            let t = t.argmax(1)?;
+            let accuracy = (y.broadcast_eq(&t.clone())?.sum_all()?.to_scalar::<u32>()? as f64) / (x.clone().dims()[0] as f64);
+
+            Ok(accuracy)
+
+        }
+
+        fn numerical_gradient(self, x: Tensor, t: Tensor) -> Result<HashMap<&'static str, Tensor>> {
+            let loss_W: Box<dyn Fn(Tensor)-> Result<Tensor> > = Box::new(|w| -> Result<Tensor> {
+                let r = self.clone().loss(x.clone(), t.clone())?;
+                Ok(r)
+            });
+
+            let mut grads: HashMap<&str, Tensor> = HashMap::new();
+            grads.insert("W1", numerical_gradient(&loss_W, self.params["W1"].clone())?);
+            grads.insert("b1", numerical_gradient(&loss_W, self.params["b1"].clone())?);
+            grads.insert("W2", numerical_gradient(&loss_W, self.params["W2"].clone())?);
+            grads.insert("b2", numerical_gradient(&loss_W, self.params["b2"].clone())?);
+
+            Ok(grads)
+        }
+
+    }
+
+    let net = TwoLayerNet::_init_(784, 100, 10, 0.01f64, device)?;
+    println!("net parameters shape w1={}, b1={}, w2={}, b2={}",
+             net.params["W1"], net.params["b1"],
+             net.params["W2"], net.params["b2"],
+    );
+
+    let x = Tensor::randn(0f32, 1f32, (100, 784), device)?;
+    let y = net.clone().predict(x.clone())?;
+    println!("x={}, y={}", x, y);
+    let t = Tensor::randn(0f32, 1f32, (100, 10), device)?.argmax(1)?.to_dtype(DType::U32)?;
+    println!("target tensor={}", t.clone());
+    let grad = net.clone().numerical_gradient(x.clone(), t.clone())?;
+    println!("grad parameters shape w1={}, b1={}, w2={}, b2={}",
+             grad["W1"], grad["b1"],
+             grad["W2"], grad["b2"],
+    );
+
+    let mnist_datasets = load_fashion_mnist()?;
+    let train_images = mnist_datasets.train_images;
+    let train_labels = mnist_datasets.train_labels;
+    let train_labels = train_labels.to_device(device)?.to_dtype(DType::U32)?;
+
+    let test_images = mnist_datasets.test_images;
+    let test_labels = mnist_datasets.test_labels;
+    let test_labels = test_labels.to_device(device)?.to_dtype(DType::U32)?;
+    let depth = mnist_datasets.labels;
+    let on_value = 1;
+    let off_value = 0;
+    // let train_labels = candle_nn::encoding::one_hot::<u32>(train_labels, depth, on_value, off_value)?;
+
+    let mut train_loss_list: Vec<_> = vec![];
+    let iters_num = 10000;
+    let train_size = train_images.dims()[0] as u32;
+    let batch_size = 100;
+    let learning_rate = 0.1;
+    let net = TwoLayerNet::_init_(784, 50, 10, 0.01f64, device)?;
+
+    /// 随机选择batch_size行记录
+    let train_idxs = (0..train_size).collect::<Vec<_>>();
+    let mut params  = net.clone().params;
+    let inner_net = net.clone();
+    let inner_net_tmp = Box::new(net.clone());
+
+    let idxs = train_idxs
+        .choose_multiple(&mut rand::thread_rng(), batch_size);
+    let idxs_tensor = Tensor::from_iter(idxs.cloned().into_iter(),device).unwrap()
+        .unsqueeze(1).unwrap();
+    let x_batch = train_images.clone().gather(&idxs_tensor.repeat((1, 784)).unwrap(),  0).unwrap();
+    let t_batch = train_labels.clone().gather(&idxs_tensor.repeat((1, 10)).unwrap(),  0).unwrap();
+
+    let grad = inner_net.numerical_gradient(x_batch.clone(), t_batch.clone()).unwrap();
+
+    println!("grad: {:?}", grad);
+
+
+    params.insert("W1", (&params["W1"]-(learning_rate * &grad.clone()["W1"]).unwrap()).unwrap());
+    let loss = inner_net_tmp.clone().loss(x_batch.clone(), t_batch.clone()).unwrap();
+    train_loss_list.push(loss);
+
+    params.insert("b1", (&params["b1"]-(learning_rate * &grad.clone()["b1"]).unwrap()).unwrap());
+    let loss = inner_net_tmp.clone().loss(x_batch.clone(), t_batch.clone()).unwrap();
+    train_loss_list.push(loss);
+
+    params.insert("W2", (&params["W2"]-(learning_rate * &grad.clone()["W2"]).unwrap()).unwrap());
+    let loss = inner_net_tmp.clone().loss(x_batch.clone(), t_batch.clone()).unwrap();
+    train_loss_list.push(loss);
+
+    params.insert("b2", (&params["b2"]-(learning_rate * &grad.clone()["b2"]).unwrap()).unwrap());
+    let loss = inner_net_tmp.clone().loss(x_batch.clone(), t_batch.clone()).unwrap();
+    train_loss_list.push(loss);
+
+    // (0..iters_num).for_each(move|i|{
+    //
+    // })
+        // .for_each(move |(x_batch, t_batch, grad)| {
+    //     for key in ["W1", "b1", "W2", "b2"] {
+    //         params.insert(key, (&params[key]-(learning_rate * &grad.clone()[key]).unwrap()).unwrap());
+    //         let loss = inner_net_tmp.clone().loss(x_batch.clone(), t_batch.clone()).unwrap();
+    //         train_loss_list.push(loss);
+    //     }
+    // })
+    ;
+
+    println!("train_loss_list: {:?}", train_loss_list);
+
+    Ok(())
+}
 
 fn main() {
     println!("deep learning get started...");
     let device = Device::cuda_if_available(0).unwrap();
-    deep_learning_v2_demo(&device).unwrap();
+    deep_learning_twolayer_net_demo(&device).unwrap()
+    // deep_learning_v2_demo(&device).unwrap();
     // deep_learning_demo(&device).unwrap();
     // multiply_preceptron_demo(&device).unwrap();
     // naive_perceptron_demo(&device).unwrap();
