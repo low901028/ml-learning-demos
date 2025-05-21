@@ -1,12 +1,15 @@
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::iter::Map;
-use std::ops::{Add, Mul};
+use std::ops::{Add, Deref, Mul};
 use candle_core::{Result, Tensor, Device, Module, DType, CustomOp1, Layout, Shape, StreamTensor, WithDType, D, IndexOp, pickle, Var};
+use candle_core::op::Op;
 use candle_core::scalar::TensorOrScalar;
 use candle_datasets::vision::Dataset;
 use candle_nn::ops::{sigmoid};
+use candle_transformers::models::deepseek2::TopKLastDimOp;
 use clap::arg;
 use clap::builder::Resettable::Reset;
 use futures::StreamExt;
@@ -15,6 +18,7 @@ use plotters::prelude::{BitMapBackend, ChartBuilder, Color, IntoDrawingArea, Int
 use rand::prelude::SliceRandom;
 use serde::Deserialize;
 use serde_pickle::DeOptions;
+use tiff::tags::Tag::Software;
 use tokio::task::id;
 
 /// 感知机
@@ -977,10 +981,530 @@ fn deep_learning_twolayer_net_demo(device: &Device) -> Result<()> {
     Ok(())
 }
 
+trait Model {
+    fn forward(&mut self, x: Tensor) -> Result<Tensor>;
+
+    fn backward(&mut self, dout: Tensor) -> Result<Tensor>;
+}
+
+struct Relu {
+    mask: Option<Var>,
+}
+
+impl Relu {
+    fn _init_() -> Result<Self> {
+        let relu = Relu {
+            mask: None,
+        };
+
+        Ok(relu)
+    }
+}
+impl Model for Relu {
+    fn forward(&mut self, x: Tensor) -> Result<Tensor> {
+        let zeros = x.zeros_like()?;
+        self.mask = Some(Var::from_tensor(&x.clone().ge(&zeros.clone())?.to_dtype(x.dtype())?)?);
+
+        let out = x.clone();
+        out.maximum(&zeros.clone())
+
+        // let mask = x.clone().le(&zeros)?;
+        // self.mask.set(&mask.to_dtype(x.dtype())?)?;
+        //
+        // let out = x.clone();
+        // let target = out.clone().gather(&self.mask.to_dtype(DType::U32)?,1)?;
+        // out.clone().slice_assign(&[..target.shape().dims()[0], ..target.shape().dims()[1]], &Tensor::zeros_like(&target.clone())? )?;
+    }
+
+    fn backward(&mut self, dout: Tensor) -> Result<Tensor> {
+        // let idxs = self.mask.clone().detach();
+        // dout.slice_assign(&[..idxs.clone().dims()[0],..idxs.clone().dims()[1]], &Tensor::zeros_like(&self.mask.clone())? )?;
+        // let dx = dout;
+
+        // let zeros = dout.zeros_like()?;
+        let dout = dout.clone().mul(self.mask.clone().unwrap().detach())?;
+        let dx = dout;
+
+        Ok(dx.clone())
+        // let zeros = dout.zeros_like()?;
+        // dout.maximum(&zeros.clone())
+    }
+}
+
+struct Sigmod{
+    out: Option<Var>,
+}
+
+impl Sigmod {
+    fn _init_() -> Result<Sigmod> {
+        let sigmod = Sigmod {
+            out: None,
+        };
+
+        Ok(sigmod)
+    }
+}
+
+impl Model for Sigmod {
+    fn forward(&mut self, x: Tensor) -> Result<Tensor> {
+        let out = (x.neg()?.exp()? + 1.0f64)?.recip()?;
+        self.out = Some(Var::from_tensor(&out)?);
+
+        Ok(out)
+    }
+
+    fn backward(&mut self, dout: Tensor) -> Result<Tensor> {
+        let dx = dout.mul(self.out.clone().unwrap().detach().neg()? + 1.0f64)?.mul(self.out.clone().unwrap().detach())?;
+
+        Ok(dx)
+    }
+}
+
+#[derive(Clone)]
+struct Affine {
+    W: Tensor,
+    b: Tensor,
+    x: Option<Var>,
+    dW: Option<Var>,
+    db: Option<Var>,
+}
+
+impl Affine {
+    fn _init_(W: Tensor, b: Tensor) -> Result<Self> {
+        let affine = Affine {
+            W: W.clone(),
+            b: b.clone(),
+            x: None,
+            dW: None,
+            db: None,
+        };
+
+        Ok(affine)
+    }
+}
+impl Model for Affine {
+    fn forward(&mut self, x: Tensor) -> Result<Tensor> {
+        self.x = Some(Var::from_tensor(&x.clone())?);
+        x.matmul(&self.W)?.broadcast_add(&self.b)
+    }
+
+    fn backward(&mut self, dout: Tensor) -> Result<Tensor> {
+        let dx = dout.clone().matmul(&self.W.t()?)?;
+        self.dW = Some(Var::from_tensor(&self.clone().x.unwrap().t()?.clone().matmul(&dout.clone())?)?);
+        self.db = Some(Var::from_tensor(&dout.clone().sum(0)?)?);
+
+        Ok(dx.clone())
+    }
+}
+
+/// ```rust
+///   class SoftmaxWithLoss:
+///     def __init__(self):
+///         self.loss = None # 损失
+///         self.y = None    # softmax的输出
+///         self.t = None    # 监督数据(one-hot vector)
+///
+///     def forward(self, x, t):
+///         self.t = t
+///         self.y = softmax(x)
+///         self.loss = cross_entropy_error(self.y, self.t)
+///
+///         return self.loss
+///
+///     def backward(self, dout=1):
+///         batch_size = self.t.shape[0]
+///         dx = (self.y - self.t) / batch_size
+///
+///         return dx
+/// ```
+///
+#[derive(Clone)]
+struct SoftmaxWithLoss {
+    loss: Option<Var>,
+    y: Option<Var>,
+    t: Option<Var>,
+}
+
+impl SoftmaxWithLoss {
+    fn _init() -> Result<SoftmaxWithLoss> {
+        let softmaxwithloss = SoftmaxWithLoss {
+            loss: None,
+            y: None,
+            t: None,
+        };
+
+        Ok(softmaxwithloss)
+    }
+
+    fn forward(&mut self, x: Tensor, t: Tensor) -> Result<Tensor> {
+        self.t = Some(Var::from_tensor(&t.clone())?);
+        self.y =  Some(Var::from_tensor(&softmax(x.clone())?)?);
+        self.loss = Some(Var::from_tensor(&cross_entropy_error(self.y.clone().unwrap().detach(), self.t.clone().unwrap().detach())?)?);
+        let loss = self.loss.clone().unwrap().detach();
+
+        Ok(loss)
+    }
+
+    fn backward(&self, dout: Tensor) -> Result<Tensor> {
+        let batch_size = self.t.clone().unwrap().shape().dims()[0];
+        let dx = (&self.y.clone().unwrap().detach() - &self.t.clone().unwrap().detach().to_dtype(DType::F32)?)? / batch_size as f64;
+
+        dx
+    }
+
+}
+
+
+fn backward_derivate_and_learning(device: &Device) -> Result<()> {
+    #[derive(Clone)]
+    struct MulLayer {
+        x: Tensor,
+        y: Tensor,
+    }
+
+    impl MulLayer {
+        fn _init_(x: Tensor, y: Tensor) -> Result<MulLayer> {
+            let mullayer = MulLayer {
+                x: x.clone(),
+                y: y.clone(),
+            };
+
+            Ok(mullayer)
+        }
+
+        fn forward(&self) -> Result<Tensor> {
+            self.x.matmul(&self.y)
+        }
+
+        fn backward(&self, dout: Tensor) -> Result<(Tensor, Tensor)> {
+            let dx = dout.matmul(&self.y)?;
+            let dy = dout.matmul(&self.x)?;
+
+            Ok((dx, dy))
+        }
+    }
+
+    let apple = Tensor::new(&[[100f32]], device)?;
+    let apple_num = Tensor::new(&[[2u32]], device)?.to_dtype(DType::F32)?;
+    let tax = Tensor::new(&[[1.1f32]], device)?;
+    // 苹果价格
+    let mul_apple_layer = MulLayer::_init_(apple.clone(), apple_num.clone())?;
+    let apple_price = mul_apple_layer.forward()?;
+    // tax price
+    let mul_tax_layer = MulLayer::_init_(apple_price.clone(), tax.clone())?;
+    let price = mul_tax_layer.forward()?;
+    println!("price: {}", price);
+
+    let dprice = Tensor::new(&[[1u32]], device)?.to_dtype(DType::F32)?;
+    let (dapple_price, dtax) = mul_tax_layer.backward(dprice.clone())?;
+    let (dapple, dapple_num) = mul_apple_layer.backward(dapple_price.clone())?;
+    println!("dapple={}, dapple_num: {}, dtax={}", dapple, dapple_num, dtax);
+
+    #[derive(Clone)]
+    struct AddLayer {}
+    impl AddLayer {
+        fn  _init_() -> Result<AddLayer> {
+            let add = AddLayer {};
+
+            Ok(add)
+        }
+
+        fn forward(&self, x: Tensor, y: Tensor) -> Result<Tensor> {
+            x.clone().add(y.clone())
+        }
+
+        fn  backward(&self, dout: Tensor) -> Result<(Tensor, Tensor)> {
+            let dx = (dout.clone() * 1f64)?;
+            let dy = (dout.clone() * 1f64)?;
+
+            Ok((dx, dy))
+        }
+    }
+
+    let apple = Tensor::new(&[[100f32]], device)?;
+    let apple_num = Tensor::new(&[[2u32]], device)?.to_dtype(DType::F32)?;
+    let orange = Tensor::new(&[[150f32]], device)?;
+    let orange_num = Tensor::new(&[[3u32]], device)?.to_dtype(DType::F32)?;
+    let tax = Tensor::new(&[[1.1f32]], device)?;
+
+    /// forward 前向传播
+    let mul_apple_layer = MulLayer::_init_(apple.clone(), apple_num.clone())?;
+    let apple_price = mul_apple_layer.forward()?;
+
+    let mul_orange_layer = MulLayer::_init_(orange.clone(), orange_num.clone())?;
+    let orange_price =  mul_orange_layer.forward()?;
+
+    let add_apple_orange_layer = AddLayer::_init_()?;
+    let all_price = add_apple_orange_layer.forward(apple_price.clone(), orange_price.clone())?;
+
+    let mul_tax_layer = MulLayer::_init_(all_price.clone(), tax.clone())?;
+    let price = mul_tax_layer.forward()?;
+    println!("price: {}", price.clone());
+
+    /// backward
+    let dprice = Tensor::new(&[[1f32]], device)?;
+    let (dall_price, dtax) = mul_tax_layer.backward(dprice.clone())?;
+    let (dapple_price, dorange_price) = add_apple_orange_layer.backward(dall_price.clone())?;
+    let (dorange, dorange_num) = mul_orange_layer.backward(dorange_price.clone())?;
+    let (dapple, dapple_num) = mul_apple_layer.backward(dapple_price.clone())?;
+    println!("dapple={}, dapple_num={}, dorange={}, dorange_num={}, tax={}"
+             , dapple, dapple_num, dorange, dorange_num, tax);
+
+    let x = Tensor::new(&[[1.0f32, -0.5], [-2.0, 3.0]], device)?;
+    let zeros = x.clone().zeros_like()?;
+    let mask = x.clone().le(&zeros)?; //(x.clone().maximum(&zeros)? + x.clone().minimum(&zeros)?)?;
+    println!("mask: {}", mask);
+    println!("out maks={}", x.maximum(&zeros.clone())?);
+
+    let mut relu = Relu::_init_()?;
+    let out = &relu.forward(x.clone())?;
+    println!("[Relu] mask:{}, out: {}", &relu.mask.clone().unwrap(), out);
+
+    // let xx = Tensor::new(&[[1.0f32, -0.1], [0.3, 3.]], device)?;
+    let dout = &relu.backward(out.clone())?;
+    println!("dout: {}", dout);
+
+    //
+    println!("=========User Define Sigmoid==========");
+    let mut sigmod = Sigmod::_init_()?;
+    let forward = sigmod.forward(x.clone())?;
+    println!("forward: {}, sigmod_out={}", forward, &sigmod.out.clone().unwrap().clone());
+    let backward = &sigmod.backward(forward.clone())?;
+    println!("backward: {}, sigmod_out={}", backward, &sigmod.out.clone().unwrap().clone());
+
+    println!("=========User Define Affine/SoftMax==========");
+    let X = Tensor::randn(0f32, 1f32, (2,), device)?;
+    let W = Tensor::randn(0f32, 1f32, (2,3), device)?;
+    let B = Tensor::randn(0f32, 1f32, (3,), device)?;
+
+    println!("Tensor random shape= X:{:?}, W:{:?}, B:{:?}", X.clone().shape(), W.clone().shape(), B.clone().shape());
+    let Y = ((X.unsqueeze(0)?.broadcast_matmul(&W))? + B.unsqueeze(0)?)?;
+    println!("Y={}", Y);
+
+    let dy = Tensor::new(&[[1f32, 2., 3.], [4.,5., 6.]], device)?;
+    let db = dy.clone().sum(0)?;
+    println!("db: {}, dim_1-sum={}", db, dy.clone().sum(1)?);
+
+    println!("============Affine================");
+    let mut afffine = Affine::_init_(W.clone(), B.unsqueeze(0)?)?;
+    let affine_out = afffine.forward(X.unsqueeze(0)?)?;
+    let affine_dout = afffine.backward(affine_out.clone())?;
+    println!("[Affine] out={}, dout={}", affine_out.clone(), affine_dout.clone());
+
+    Ok(())
+}
+
+struct TwoLayerNet {
+    params: HashMap<&'static str, Tensor>,
+    // layers: HashMap<&'static str, &'static dyn Model>,
+    affine1: Affine,
+    relu: Relu,
+    affine2: Affine,
+    lastLayer: SoftmaxWithLoss,
+}
+impl TwoLayerNet {
+    fn  _init_(input_size: usize, hidden_size: usize, output_size: usize, weight_init_std: f64, device: &Device) -> Result<TwoLayerNet> {
+        /// 权重W 偏置b
+        let mut params = HashMap::with_capacity(8);
+        params.insert("W1", (Tensor::randn(0f32, 1f32, (input_size, hidden_size), device)?  * weight_init_std)? );
+        params.insert("b1", Tensor::zeros(hidden_size, DType::F32, device)?);
+
+        params.insert("W2", (Tensor::randn(0f32, 1f32, (hidden_size, output_size), device)?  * weight_init_std)? );
+        params.insert("b2", Tensor::zeros(output_size, DType::F32, device)?);
+
+        let affine1 = Affine::_init_(params["W1"].clone(), params["b1"].clone())?;
+        let relu = Relu::_init_()?;
+        let affine2 = (Affine::_init_(params["W2"].clone(), params["b2"].clone())?);
+        let lastLayer = SoftmaxWithLoss::_init()?;
+
+
+        Ok(TwoLayerNet { params, affine1, relu, affine2, lastLayer })
+
+    }
+
+    fn predict(&mut self , x: Tensor) -> Result<Tensor> {
+        self.affine2.forward(self.relu.forward(self.affine1.forward(x.clone())?)?)
+    }
+
+    fn loss(&mut self, x: Tensor, t: Tensor) -> Result<Tensor> {
+        let y = self.predict(x.clone())?;
+        self.lastLayer.forward(y.clone(), t.clone())
+    }
+
+    fn accuracy(&mut self, x: Tensor, t: Tensor) -> Result<Tensor> {
+        let y = self.predict(x.clone())?;
+        let y = y.argmax(1)?;
+        let t = if t.dims().len() != 1 {
+            t.argmax(1)?
+        }else {
+            t
+        };
+
+        let accuracy = (Tensor::sum_all(&y.clone().eq(&t.clone())?.to_dtype(DType::F64)?)? / (x.clone().dims()[0] as f64))?;
+
+        Ok(accuracy)
+    }
+
+    fn numerical_gradient(&mut self, x: Tensor, t: Tensor) -> Result<HashMap<&'static str, Tensor>> {
+        let loss = self.loss(x.clone(), t.clone())?;
+        let loss_w = move |tensor| -> Result<Tensor> {Ok(loss.clone())};
+        let mut grads: HashMap<&'static str, Tensor> = HashMap::with_capacity(8);
+        grads.insert("W1", numerical_gradient(loss_w.clone(), self.params["W1"].detach())?);
+        grads.insert("b1", numerical_gradient(loss_w.clone(), self.params["b1"].detach())?);
+        grads.insert("W2", numerical_gradient(loss_w.clone(), self.params["W2"].detach())?);
+        grads.insert("b2", numerical_gradient(loss_w.clone(), self.params["b2"].detach())?);
+
+        Ok(grads)
+    }
+
+    fn gradient(&mut self, x: Tensor, t: Tensor) -> Result<HashMap<&'static str, Tensor>> {
+        &self.loss(x.clone(), t.clone())?;
+        let dout = Tensor::new(&[1f32], x.device())?;
+        let dout = self.lastLayer.backward(dout)?;
+        // let dout_var = Var::from_tensor(&dout)?;
+
+        let affine1 = &mut self.affine1;
+        let relu = &mut self.relu;
+        let affine2 = &mut self.affine2;
+        affine1.backward(relu.backward(affine2.backward(dout)?)?)?;
+
+        let mut grads: HashMap<&'static str, Tensor> = HashMap::with_capacity(8);
+        grads.insert("W1", affine1.dW.clone().unwrap().detach());
+        grads.insert("b1", affine1.db.clone().unwrap().detach());
+        grads.insert("W2", affine2.dW.clone().unwrap().detach());
+        grads.insert("b2", affine2.db.clone().unwrap().detach());
+
+        Ok(grads)
+    }
+
+}
+fn two_layer_deep_learning_demo(device: &Device) -> Result<()> {
+    let mnist_datasets = load_fashion_mnist()?;
+    let train_images = mnist_datasets.train_images;
+    let train_labels = mnist_datasets.train_labels;
+    let train_labels = train_labels.to_device(device)?.to_dtype(DType::U32)?;
+
+    let test_images = mnist_datasets.test_images;
+    let test_labels = mnist_datasets.test_labels;
+    let test_labels = test_labels.to_device(device)?.to_dtype(DType::U32)?;
+
+    let depth = mnist_datasets.labels;
+    let on_value = 1;
+    let off_value = 0;
+    let train_labels = candle_nn::encoding::one_hot::<u32>(train_labels, depth, on_value, off_value)?;
+
+    let mut network = TwoLayerNet::_init_(784, 50, 10, 0.01f64, device)?;
+    let x_batch  = train_images.i(..3)?;
+    let t_batch = train_labels.i(..3)?;
+    println!("train batch images: {}, {}", x_batch, t_batch);
+
+    let grad_numberical = network.numerical_gradient(x_batch.clone(), t_batch.clone())?;
+    let grad_backprop = network.gradient(x_batch.clone(), t_batch.clone())?;
+
+    for (k, v) in grad_numberical {
+        let lhs = grad_backprop.get(k).unwrap();
+        let diff = if lhs.clone().dims().len() >= v.clone().dims().len() {
+            let lhs = lhs.clone().topk(1)?.indices.squeeze(0)?;
+            lhs.clone().broadcast_sub(&v.clone().to_dtype(lhs.dtype())?.reshape((v.dims()[0], 1))?)?.abs()?.mean_all()?
+        } else {
+            let v = v.topk(1)?.indices.squeeze(0)?;
+            v.clone().to_dtype(lhs.dtype())?.broadcast_sub(&lhs.clone().reshape((lhs.dims()[0], 1))?)?.abs()?.mean_all()?
+        };
+        
+        println!("grad: key={:?} -> diff={}", k, diff);
+    }
+
+    Ok(())
+}
+
+fn two_layer_deep_learning_demo_v2(device: &Device) -> Result<()> {
+    let mnist_datasets = load_fashion_mnist()?;
+    let train_images = mnist_datasets.train_images;
+    let train_labels = mnist_datasets.train_labels;
+    let train_labels = train_labels.to_device(device)?.to_dtype(DType::U32)?;
+
+    let test_images = mnist_datasets.test_images;
+    let test_labels = mnist_datasets.test_labels;
+    let test_labels = test_labels.to_device(device)?.to_dtype(DType::U32)?;
+
+    let depth = mnist_datasets.labels;
+    let on_value = 1;
+    let off_value = 0;
+    let train_labels = candle_nn::encoding::one_hot::<u32>(train_labels, depth, on_value, off_value)?;
+
+    let mut network = TwoLayerNet::_init_(784, 50, 10, 0.01f64, device)?;
+    
+    let iters_num = 10000;
+    let train_size = train_images.dims()[0] as u32;
+    let batch_size = 100;
+    let learning_rate = 0.1;
+    let mut train_loss_list: Vec<Tensor> = vec![];
+    let mut train_acc_list: Vec<Tensor> =  vec![];
+    let mut test_acc_list: Vec<Tensor> =  vec![];
+
+    let iter_per_epoch = (train_size / batch_size as u32).max(1) as u32;
+    /// 随机选择batch_size行记录
+    let train_idxs = (0..train_size).collect::<Vec<_>>();
+    
+    for i in (1..=iters_num) {
+        let idxs = train_idxs
+            .choose_multiple(&mut rand::thread_rng(), batch_size);
+        let idxs_tensor = Tensor::from_iter(idxs.cloned().into_iter(),device)?
+            // .unsqueeze(1)?
+            ;
+        // println!("train_idxs: {}", idxs_tensor);
+        // let x_batch = train_images.clone().gather(&idxs_tensor,  0)?;
+        // let t_batch = train_labels.clone().gather(&idxs_tensor,  0)?;
+        let x_batch = train_images.clone().index_select(&idxs_tensor, 0)?;
+        let t_batch = train_labels.clone().index_select(&idxs_tensor,  0)?;
+
+        // 通过误差反向传播法求梯度
+        let grad = network.gradient(x_batch.clone(), t_batch.clone())?;
+
+        // 更新
+        for key in vec!["W1", "b1", "W2", "b2"] {
+            let val = (network.params.get(key).unwrap() - (grad.get(key).unwrap().clone() * learning_rate)?)? ;
+            network.params.insert(key, val);
+        }
+
+        let loss = network.loss(x_batch.clone(), t_batch.clone())?;
+        train_loss_list.push(loss.clone());
+
+        if i  % iter_per_epoch == 0 {
+            let train_acc = network.accuracy(train_images.clone(), train_labels.clone())?;
+            let test_acc = network.accuracy(test_images.clone(), test_labels.clone())?;
+            train_acc_list.push(train_acc.clone());
+            test_acc_list.push(test_acc.clone());
+            println!("acc train={}, test={}", train_acc.clone(), test_acc.clone());
+        }
+    }
+    
+    Ok(())
+}
+
+fn one_hot_cold_demo(device: &Device) -> Result<()>{
+    let indices = Tensor::new(vec![vec![0i64, 2], vec![1, -1]], device).unwrap();
+    let depth = 4;
+    let on_value = 1;
+    let off_value = 0;
+    let one_hot = candle_nn::encoding::one_hot::<u32>(indices, depth, on_value, off_value)?;
+    let one_squeeze = one_hot.clone().topk(1)?.indices.squeeze(0)?;
+    println!("one_hot_cold_demo: {}, one_squeeze={}", one_hot.clone(), one_squeeze);
+
+    Ok(())
+}
+
+
 fn main() {
     println!("deep learning get started...");
     let device = Device::cuda_if_available(0).unwrap();
-    deep_learning_twolayer_net_demo(&device).unwrap()
+    // one_hot_cold_demo(&device).unwrap();
+    two_layer_deep_learning_demo_v2(&device).unwrap();
+    // two_layer_deep_learning_demo(&device).unwrap();
+
+    // backward_derivate_and_learning(&device).unwrap()
+
+    // deep_learning_twolayer_net_demo(&device).unwrap()
     // deep_learning_v2_demo(&device).unwrap();
     // deep_learning_demo(&device).unwrap();
     // multiply_preceptron_demo(&device).unwrap();
