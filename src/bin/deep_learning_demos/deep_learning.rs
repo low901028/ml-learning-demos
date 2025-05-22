@@ -1446,6 +1446,10 @@ fn two_layer_deep_learning_demo_v2(device: &Device) -> Result<()> {
     /// 随机选择batch_size行记录
     let train_idxs = (0..train_size).collect::<Vec<_>>();
     
+    // let mut optimizer = SimpleSGD::_init_(0.01);
+    // let mut optimizer = SimpleMomentum::_init_(0.01, 0.9);
+    let mut optimizer = SimpleAdaGrad::_init_(0.01);
+    
     for i in (1..=iters_num) {
         let idxs = train_idxs
             .choose_multiple(&mut rand::thread_rng(), batch_size);
@@ -1460,12 +1464,16 @@ fn two_layer_deep_learning_demo_v2(device: &Device) -> Result<()> {
 
         // 通过误差反向传播法求梯度
         let grad = network.gradient(x_batch.clone(), t_batch.clone())?;
+        let mut params = network.params.iter().map(|(k, v)|{
+            (k.clone(), Var::from_tensor(&v.clone()).unwrap())
+        }).collect::<HashMap<&str,Var>>();
+        optimizer.update(&mut params, &grad)?;
 
         // 更新
-        for key in vec!["W1", "b1", "W2", "b2"] {
-            let val = (network.params.get(key).unwrap() - (grad.get(key).unwrap().clone() * learning_rate)?)? ;
-            network.params.insert(key, val);
-        }
+        // for key in vec!["W1", "b1", "W2", "b2"] {
+        //     let val = (network.params.get(key).unwrap() - (grad.get(key).unwrap().clone() * learning_rate)?)? ;
+        //     network.params.insert(key, val);
+        // }
 
         let loss = network.loss(x_batch.clone(), t_batch.clone())?;
         train_loss_list.push(loss.clone());
@@ -1480,6 +1488,145 @@ fn two_layer_deep_learning_demo_v2(device: &Device) -> Result<()> {
     }
     
     Ok(())
+}
+
+struct SimpleSGD {
+    lr: f64
+}
+
+impl SimpleSGD {
+    fn _init_(lr: f64) -> Self {
+        SimpleSGD { lr }
+    }
+
+    fn update(
+        &mut self,
+        params: &mut HashMap<&str, Var>,
+        grads: &HashMap<&str, Tensor>, // 改为不可变借用
+    ) -> Result<()> {
+        // 1. 优化键集合处理
+        let param_keys: Vec<&str> = params.keys().copied().collect();
+
+        for key in param_keys { // 直接解构&str
+            // 2. 安全获取梯度
+            let grad = grads.get(&key).unwrap();
+
+            // 3. 分步计算并优化错误处理
+            let scaled_grad = (grad.detach() * self.lr)?;
+
+            // 4. 使用可变引用直接修改参数
+            let param = params.get_mut(&key)
+            .expect("Parameter existence guaranteed by key collection");
+
+            // 5. 避免临时变量克隆
+            let updated_tensor = (param.as_tensor() - &scaled_grad)?;
+            *param = Var::from_tensor(&updated_tensor)?;
+        }
+
+        Ok(())
+    }
+    
+}
+
+struct SimpleMomentum {
+    lr: f64,
+    momentum: f64,
+    v: Option<HashMap<&'static str, Var>>,
+}
+
+impl SimpleMomentum {
+    fn _init_(lr: f64, momentum: f64) -> Self {
+        SimpleMomentum { 
+            lr, 
+            momentum,
+            v:  None,
+        }
+    }
+
+    fn update(
+        &mut self,
+        params: & mut HashMap<&str, Var>,
+        grads: &HashMap<&str, Tensor>,
+    ) -> Result<()> {
+        // 第一阶段：提前获取需要的信息
+        let params_keys: Vec<&str> = params.keys().copied().collect();
+        let mut vv = self.v.clone();
+        
+        if vv.is_none() {
+            let mut v_map = HashMap::new();
+            
+            for (key, val) in &mut *params {
+                v_map.insert(*key, Var::from_tensor(&val.zeros_like()?)?);
+            }
+            
+            vv = Some(v_map);
+        }
+        
+        let vv = vv.clone().unwrap();
+        // 第三阶段：参数更新
+        for &key in &params_keys {
+            // 安全获取梯度（独立作用域）
+            let scaled_grad = {
+                let grad = grads.get(key).unwrap();
+                
+                let v = vv.get(key).unwrap();
+                ((v.clone().as_tensor()*self.momentum)? - (grad.detach() * self.lr)?)?
+            };
+
+            // 获取参数可变引用
+            let param = &params.get(key)
+                .expect("Guaranteed by params_keys");
+
+            // 执行更新
+            let new_val = (param.clone().as_tensor() - &scaled_grad).unwrap();
+            param.clone().set(&new_val)?;
+        }
+
+        Ok(())
+    }
+}
+
+struct SimpleAdaGrad{
+    lr: f64,
+    h: Option<HashMap<&'static str, Var>>,
+}
+
+impl SimpleAdaGrad {
+    fn _init_(lr: f64) -> SimpleAdaGrad {
+        SimpleAdaGrad { lr, h: None }
+    }
+    
+    fn update(
+        &mut self,
+        params: &mut HashMap<&str, Var>,
+        grads: &HashMap<&str, Tensor>,
+    ) -> Result<()>{
+        let  param_keys: Vec<&str> = params.keys().copied().collect();
+
+        let mut vv = self.h.clone();
+
+        if vv.is_none() {
+            let mut v_map = HashMap::new();
+
+            for (key, val) in &mut *params {
+                v_map.insert(*key, Var::from_tensor(&val.zeros_like()?)?);
+            }
+
+            vv = Some(v_map);
+        }
+
+        let vv = vv.clone().unwrap();
+        for  key in param_keys {
+            let val =  (vv.get(key).unwrap().as_tensor() - grads.get(key).unwrap().sqr()?)?;
+            vv.get(&key).unwrap().set(&val)?;
+            
+            let new_val = (params.get(&key).unwrap().as_tensor() - ((grads.get(key).unwrap().detach() * self.lr)? / (vv.get(key).unwrap().sqrt()? + 1e-7)?)?)?;    
+            params.clone().get(&key).unwrap().set(&new_val)?
+        }
+        
+        
+        Ok(())
+    }
 }
 
 fn one_hot_cold_demo(device: &Device) -> Result<()>{
