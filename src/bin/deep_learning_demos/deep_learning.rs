@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::iter::Map;
 use std::ops::{Add, Deref, Mul};
-use candle_core::{Result, Tensor, Device, Module, DType, CustomOp1, Layout, Shape, StreamTensor, WithDType, D, IndexOp, pickle, Var};
+use candle_core::{Result, Tensor, Device, Module, DType, CustomOp1, Shape, StreamTensor, WithDType, D, IndexOp, pickle, Var};
 use candle_core::op::Op;
 use candle_core::scalar::TensorOrScalar;
 use candle_datasets::vision::Dataset;
@@ -12,7 +12,8 @@ use candle_nn::ops::{sigmoid};
 use candle_transformers::models::deepseek2::TopKLastDimOp;
 use clap::arg;
 use clap::builder::Resettable::Reset;
-use futures::StreamExt;
+use clap::builder::TypedValueParser;
+use futures::{FutureExt, StreamExt};
 use image::{DynamicImage, GrayImage};
 use plotters::prelude::{BitMapBackend, ChartBuilder, Color, IntoDrawingArea, IntoFont, LineSeries, PathElement, BLACK, RED, WHITE};
 use rand::prelude::SliceRandom;
@@ -1445,7 +1446,7 @@ fn two_layer_deep_learning_demo_v2(device: &Device) -> Result<()> {
     let iter_per_epoch = (train_size / batch_size as u32).max(1) as u32;
     /// 随机选择batch_size行记录
     let train_idxs = (0..train_size).collect::<Vec<_>>();
-    
+
     // let mut optimizer = SimpleSGD::_init_(0.01);
     // let mut optimizer = SimpleMomentum::_init_(0.01, 0.9);
     let mut optimizer = SimpleAdaGrad::_init_(0.01);
@@ -1525,7 +1526,7 @@ impl SimpleSGD {
 
         Ok(())
     }
-    
+
 }
 
 struct SimpleMomentum {
@@ -1536,8 +1537,8 @@ struct SimpleMomentum {
 
 impl SimpleMomentum {
     fn _init_(lr: f64, momentum: f64) -> Self {
-        SimpleMomentum { 
-            lr, 
+        SimpleMomentum {
+            lr,
             momentum,
             v:  None,
         }
@@ -1551,24 +1552,24 @@ impl SimpleMomentum {
         // 第一阶段：提前获取需要的信息
         let params_keys: Vec<&str> = params.keys().copied().collect();
         let mut vv = self.v.clone();
-        
+
         if vv.is_none() {
             let mut v_map = HashMap::new();
-            
+
             for (key, val) in &mut *params {
                 v_map.insert(*key, Var::from_tensor(&val.zeros_like()?)?);
             }
-            
+
             vv = Some(v_map);
         }
-        
+
         let vv = vv.clone().unwrap();
         // 第三阶段：参数更新
         for &key in &params_keys {
             // 安全获取梯度（独立作用域）
             let scaled_grad = {
                 let grad = grads.get(key).unwrap();
-                
+
                 let v = vv.get(key).unwrap();
                 ((v.clone().as_tensor()*self.momentum)? - (grad.detach() * self.lr)?)?
             };
@@ -1595,7 +1596,7 @@ impl SimpleAdaGrad {
     fn _init_(lr: f64) -> SimpleAdaGrad {
         SimpleAdaGrad { lr, h: None }
     }
-    
+
     fn update(
         &mut self,
         params: &mut HashMap<&str, Var>,
@@ -1619,12 +1620,12 @@ impl SimpleAdaGrad {
         for  key in param_keys {
             let val =  (vv.get(key).unwrap().as_tensor() - grads.get(key).unwrap().sqr()?)?;
             vv.get(&key).unwrap().set(&val)?;
-            
-            let new_val = (params.get(&key).unwrap().as_tensor() - ((grads.get(key).unwrap().detach() * self.lr)? / (vv.get(key).unwrap().sqrt()? + 1e-7)?)?)?;    
+
+            let new_val = (params.get(&key).unwrap().as_tensor() - ((grads.get(key).unwrap().detach() * self.lr)? / (vv.get(key).unwrap().sqrt()? + 1e-7)?)?)?;
             params.clone().get(&key).unwrap().set(&new_val)?
         }
-        
-        
+
+
         Ok(())
     }
 }
@@ -1641,12 +1642,126 @@ fn one_hot_cold_demo(device: &Device) -> Result<()>{
     Ok(())
 }
 
+use plotly::common::{Font};
+use plotly::layout::{Annotation, LayoutGrid, Layout, GridPattern};
+use plotly::{Histogram, Plot};
+use plotly::histogram::Bins;
+
+fn plot_activations(activations: &HashMap<String, Vec<Vec<f32>>>) {
+    let layer_count = activations.len();
+    let mut plot = Plot::new();
+
+    // 创建 Grid 布局
+    let grid = LayoutGrid::new()
+        .rows(1)
+        .columns(layer_count)
+        .pattern(GridPattern::Independent);
+
+    // 收集所有直方图 traces
+    let mut traces = Vec::new();
+    let mut annotations = Vec::new();
+
+    // 计算每个子图的 domain 宽度
+    let domain_width = 1.0 / layer_count as f64;
+
+    for (idx, (layer_name, a)) in activations.iter().enumerate() {
+        // 扁平化数据
+        let x_data: Vec<f32> = a.iter()
+            .flatten()
+            .cloned()
+            .collect();
+
+        // 创建直方图
+        let trace = Histogram::new(x_data)
+            .name(layer_name)
+            .opacity(0.75)
+            .x_bins(Bins::new(0.0, 1.0, 1.0/30.0));
+
+        // 计算子图位置
+        let x_domain_start = idx as f64 * domain_width;
+        let x_domain_end = (idx as f64 + 1.0) * domain_width;
+
+        // 设置坐标轴
+        let x_axis_name = format!("x{}", idx + 1);
+        let y_axis_name = format!("y{}", idx + 1);
+
+        traces.push(
+            trace
+                .x_axis(&x_axis_name)
+                .y_axis(&y_axis_name)
+        );
+
+        // 添加子图标题注解
+        let annotation = Annotation::new()
+            .x((x_domain_start + x_domain_end) / 2.0)
+            .y(1.05)
+            .ax_ref("paper")
+            .ay_ref("paper")
+            .text(format!("{}-layer", idx + 1))
+            .show_arrow(false)
+            .font(Font::new().size(12));
+
+        annotations.push(annotation);
+    }
+
+    // 配置布局
+    let layout = Layout::new()
+        .grid(grid)
+        .annotations(annotations)
+        .show_legend(false)
+        .height(400)
+        .width(300 * layer_count as usize);
+
+    plot.set_layout(layout);
+
+    // 添加 traces 到 plot
+    for trace in traces {
+        plot.add_trace(trace);
+    }
+
+    // 显示图表
+    plot.show();
+}
+
+fn weight_decry_demo(device: &Device) -> Result<()>{
+    let x = Tensor::randn(0f32, 1f32, (1000, 100), device)?;
+    let node_num = 100;
+    let hidden_layer_size = 5;
+    let mut activations: Vec<Tensor>  = vec![];
+
+    for i in (0..hidden_layer_size) {
+        let x = if i != 0 {
+            &activations[i - 1]
+        } else {
+            &x.clone()
+        };
+
+        let w = Tensor::randn(0f32, 1f32, (node_num, node_num), device)? * 1.0;
+        let z = x.matmul(&w?)?;
+        let a = sigmod(z.clone())?;
+        activations.insert(i, a.clone())
+    }
+
+    use plotly::{Histogram,};
+    use plotly::layout::{GridPattern, Layout, LayoutGrid,};
+
+    let mut datas = HashMap::new();
+    for (i, t) in activations.iter().enumerate() {
+        let data = t.clone().to_vec2::<f32>()?;
+        datas.insert(format!("{:?}-layer",(i+1)), data);
+    }
+
+    plot_activations(&datas);
+
+    Ok(())
+}
 
 fn main() {
     println!("deep learning get started...");
     let device = Device::cuda_if_available(0).unwrap();
+    weight_decry_demo(&device).unwrap()
     // one_hot_cold_demo(&device).unwrap();
-    two_layer_deep_learning_demo_v2(&device).unwrap();
+    // two_layer_deep_learning_demo_v2(&device).unwrap();
     // two_layer_deep_learning_demo(&device).unwrap();
 
     // backward_derivate_and_learning(&device).unwrap()

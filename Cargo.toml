@@ -38,7 +38,7 @@ safetensors = {version = "0.5"}
 rusty-pkl = { git="https://github.com/ladroid/rusty-pkl.git", branch = "main"}
 # torch c++ api binding
 #tch = { version="0.19.0"}
-
+plotly  = {git="https://github.com/plotly/plotly.rs.git", branch="main"}
 ndarray= { version="0.16.1", features = ["default"] }
 ndarray-rand = { version = "0.15.0"}
 rand_distr="0.4"
