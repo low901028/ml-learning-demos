@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::iter::Map;
-use std::ops::{Add, Deref, Mul};
+use std::ops::{Add, Deref, Div, Mul, Neg};
 use candle_core::{Result, Tensor, Device, Module, DType, CustomOp1, Shape, StreamTensor, WithDType, D, IndexOp, pickle, Var};
 use candle_core::op::Op;
 use candle_core::scalar::TensorOrScalar;
@@ -1710,7 +1710,7 @@ fn plot_activations(activations: &HashMap<String, Vec<Vec<f32>>>) {
         .annotations(annotations)
         .show_legend(false)
         .height(400)
-        .width(300 * layer_count as usize);
+        .width(300 * layer_count);
 
     plot.set_layout(layout);
 
@@ -1723,6 +1723,14 @@ fn plot_activations(activations: &HashMap<String, Vec<Vec<f32>>>) {
     plot.show();
 }
 
+// tanh(x) = (e^x - e^(-x)) / (e^x + e^(-x))
+fn simple_tanh(x: Tensor) -> Result<Tensor> {
+    (x.clone().exp()? - x.clone().neg()?.exp()?)? / (x.clone().exp()? + x.clone().neg()?.exp()?)?
+}
+
+fn simple_relu(x: Tensor) -> Result<Tensor> {
+    x.clone().maximum(0.0)
+}
 fn weight_decry_demo(device: &Device) -> Result<()>{
     let x = Tensor::randn(0f32, 1f32, (1000, 100), device)?;
     let node_num = 100;
@@ -1737,8 +1745,20 @@ fn weight_decry_demo(device: &Device) -> Result<()>{
         };
 
         let w = Tensor::randn(0f32, 1f32, (node_num, node_num), device)? * 1.0;
+
+        // 会导致各层激活函数，集中在0.5左右，进而梯度表现力受限
+        let w = Tensor::randn(0f32, 1f32, (node_num, node_num), device)? * 0.01;
+
+        // xavier初始化参数的方式来
+        // 各层间传递的数据有适当的广度
+        let w = Tensor::randn(0f32, 1f32, (node_num, node_num), device)? / (node_num.isqrt() as f64);
+
+        // he初始化参数，且激活函数为Relu
+        let w = Tensor::randn(0f32, 1f32, (node_num, node_num), device)? / (2.0.div(node_num as f64).sqrt());
         let z = x.matmul(&w?)?;
-        let a = sigmod(z.clone())?;
+        // let a = sigmod(z.clone())?;
+        // let a = simple_tanh(z.clone())?;
+        let a = simple_relu(z.clone())?;
         activations.insert(i, a.clone())
     }
 
@@ -1756,10 +1776,192 @@ fn weight_decry_demo(device: &Device) -> Result<()>{
     Ok(())
 }
 
+struct SimpleDropout {
+    dropout_ratio: f64,
+    mask: Option<Var>,
+}
+
+impl SimpleDropout {
+    fn _init_(dropout_ratio: f64) -> SimpleDropout {
+        SimpleDropout {
+            dropout_ratio,
+            mask: None,
+        }
+    }
+    
+    fn forward(&mut self, x: Tensor, train_flag: bool) -> Result<Tensor> {
+        let result = if train_flag {
+            let mask_tensor = &Tensor::randn(0f32, 1f32, x.clone().shape(), x.clone().device())?.maximum(self.dropout_ratio)?;
+            self.mask = Some(Var::from_tensor(&mask_tensor.clone())?);
+            // self.mask.unwrap().set();
+            x.clone() * mask_tensor.clone()
+        } else {
+            x.clone() * (self.dropout_ratio.neg() + 1.0)
+        };
+        
+        result
+    }
+
+    fn backward(self, dout: Tensor) -> Result<Tensor> {
+        dout * self.mask.unwrap().as_tensor()
+    }
+}
+
+fn deep_learning_simple_dropout_demo(device: &Device) -> Result<()>{
+    let x = Tensor::randn(0f32, 1f32, (3,4), device)?;
+    let mut dropout = SimpleDropout::_init_(0.12);
+    let forward_ = &dropout.forward(x.clone(), true)?;
+    println!("Dropout forward={}", forward_);
+    let backward_ = &dropout.backward(x.clone())?;
+    println!("Dropout backward={}", backward_);
+
+    Ok(())
+}
+
+fn deep_learning_superparam_demo(device: &Device) -> Result<()>{
+    let weight_decay = (candle_nn::Init::Uniform {lo: -8.0, up:-4.0}.var((3,4), DType::F32, device)?.as_tensor() * 10.0)?;
+    let lr = (candle_nn::Init::Uniform {lo:-6.0, up:-2.0}.var((3,4), DType::F32, device)?.as_tensor() * 10.0)?;
+
+    println!("weight decay ={}, lr={}", weight_decay, lr);
+    Ok(())
+}
+
+fn conv_neural_networks(device: &Device) -> Result<()> {
+    let h = 32;
+    let w = 48;
+
+    let input_2d_data = Tensor::randn(0f32,1., (h,w), device)?;
+    let output_2d_data = Var::from_tensor(&Tensor::zeros((h,w), DType::F32, device)?)?;
+    let kernal = Tensor::randn(0f32, 1., (3,3), device)?;
+    let padding = Tensor::zeros((h+2, w+2), DType::F32, device)?;
+    let padding = padding.slice_assign(&[1..=h, 1..=w], &input_2d_data.clone())?;
+    println!("after slice_assign: {}", padding);
+    for i in (0..h) {
+        for j in (0..w) {
+            let window = padding.clone().i((i..i+3, j..j+3))?;
+            // println!("(kernal*window)={}", (kernal.clone() * window.clone())?);
+            let window_sum = (kernal.clone()*window)?.sum_all()?.reshape((1,1))?;
+            // println!("(window_sum)={}", window_sum.clone());
+            let output_2d_data_tensor = output_2d_data.slice_assign(&[i..i+1,j..j+1],&window_sum.clone())?;
+            output_2d_data.set(&output_2d_data_tensor)?
+        }
+    }
+
+    println!("output 2d data:{}", output_2d_data.clone());
+
+    Ok(())
+}
+
+///
+// def conv2D(input_2Ddata, kern):
+//     (h, w) = input_2Ddata.shape # 输入数据的高度和宽度
+//     (kern_h, kern_w) = kern.shape # 卷积核的高度和宽度
+//     padding_h = (kern_h-1)//2
+//     padding_w = (kern_w-1)//2
+//     padding = np.zeros(shape = (h+2＊padding_h, w+2＊padding_w))
+//     # 0填充
+//     padding[padding_h:-padding_h, padding_w:-padding_w] =
+//         input_2Ddata
+//     output_2Ddata = np.zeros(shape = (h, w)) # 输出数据的尺寸和
+//         输入数据一样
+//
+//     for i in range(h):
+//         for j in range(w):
+//             window = padding[i:i+kern_h, j:j+kern_w]
+//             # 局部窗口
+//             output_2Ddata[i, j] = np.sum(kern＊window) # 内积
+//     return output_2Ddata
+// ##########################################################
+//
+// h = 32 # 输入数据的高度
+// w = 48 # 输入数据的宽度
+// in_d = 12 # 输入数据的深度
+// out_d = 24 # 输出数据的深度
+// input_3Ddata = np.random.randn(h, w, in_d)
+// output_3Ddata = np.zeros(shape = (h, w, out_d))
+//
+// (kern_h, kern_w) = (3, 3) # 或者(5, 5)
+// kerns = np.random.randn(out_d, kern_h, kern_w, in_d)
+// # 4D卷积核
+// bias = np.random.randn(out_d) # 1D偏置
+//
+// for m in range(out_d): # 每一个输出2D 数据
+//     for k in range(in_d): # 每一个输入2D数据
+//         input_2Ddata = input_3Ddata[:, :, k] # 第k个输入2D数据
+//         kern = kerns[m, :, :, k]
+//         output_3Ddata[:, :, m] += conv2D(input_2Ddata, kern)
+//         # 加上每个卷积结果
+//     output_3Ddata[:, :, m] += bias[m] # 每个输出2D 数据只有
+//         一个偏置
+
+fn conv2D(input_2d_data: Tensor, kern: Tensor, device: &Device) -> Result<Tensor> {
+    let (h, w) = (input_2d_data.clone().dims()[0], input_2d_data.clone().dims()[1]);
+    let (kern_h, kern_w) = (kern.clone().dims()[0], kern.clone().dims()[1]);
+    let padding_h = (kern_h - 1);
+    let padding_w = (kern_w - 1);
+    let padding = Tensor::zeros((h+2*padding_h, w+2*padding_w),DType::F32, device)?;
+    let padding = padding.clone().slice_assign(&[padding_h..padding.clone().dims()[0]-padding_h, padding_w..padding.clone().dims()[1]-padding_w], &input_2d_data.clone())?;
+
+    let output_2d_data = Var::from_tensor(&Tensor::zeros((h,w), DType::F32, device)?)?;
+
+    for i in (0..h) {
+        for j in (0..w) {
+            let window = padding.clone().i((i..i+kern_h, j..j+kern_w))?;
+            // println!("(kernal*window)={}", (kernal.clone() * window.clone())?);
+            let window_sum = kern.clone().broadcast_mul(&window.reshape((window.clone().dims()[0], window.clone().dims()[1],1))?)?.sum_all()?.reshape((1,1))?;
+            // println!("(window_sum)={}", window_sum.clone());
+            let output_2d_data_tensor = output_2d_data.slice_assign(&[i..i+1,j..j+1],&window_sum.clone())?;
+            output_2d_data.set(&output_2d_data_tensor)?
+        }
+    }
+
+    Ok(output_2d_data.as_detached_tensor())
+
+}
+
+///
+/// 3D特征图表示为 [H×W×D]，其中H是高度，W是宽度，D是深度。
+/// 3D特征图可以看作D个2D数据，每个2D数据的尺寸均是 [H×W]，称为特征图，3D特征图总共有 D个特征图
+/// 
+fn conv_neural_networks_v2(device: &Device) -> Result<()> {
+    let h = 32;
+    let w = 48;
+    let in_d = 12;
+    let out_d = 24;
+
+    let input_3d_data = Tensor::randn(0f32, 1., (h,w,in_d), device)?;
+    let output_3d_data = Var::from_tensor(&Tensor::randn(0f32, 1., (h,w,out_d), device)?)?;
+    let (kern_h,  kern_w) = (3,3);
+    let kerns = Tensor::randn(0f32, 1., (out_d, kern_h, kern_w, in_d), device)?;
+    let bias = Tensor::randn(0f32, 1., (out_d), device)?;
+
+    for m in (0..out_d) {
+        for k in (0..in_d)  {
+            let input_2d_data = input_3d_data.clone().i((0..input_3d_data.clone().dims()[0],0..input_3d_data.clone().dims()[1],k))?;
+            let kern = kerns.clone().i((m,0..kerns.clone().dims()[1], 0..kerns.clone().dims()[2], k))?;
+            let output_3d_add_2d_data =
+                (output_3d_data.clone().i((0..output_3d_data.clone().dims()[0], 0..output_3d_data.clone().dims()[1], m))?
+                    + conv2D(input_2d_data.clone(), kern.clone(), device)?)?;
+
+            let output_3d_add_2d_bisa_data = output_3d_add_2d_data.clone().broadcast_add(&bias.clone().i(m)?)?;
+            let output_3d_data_tensor = output_3d_data.clone().slice_assign(&[0..output_3d_data.clone().dims()[0], 0..output_3d_data.clone().dims()[1], m..m+1],&output_3d_add_2d_bisa_data.clone().reshape((output_3d_add_2d_bisa_data.clone().dims()[0], output_3d_add_2d_bisa_data.clone().dims()[1], 1))?)?;
+            output_3d_data.set(&output_3d_data_tensor)?
+        }
+    }
+
+    println!("output 3d data={}", output_3d_data.clone());
+    Ok(())
+}
+
 fn main() {
     println!("deep learning get started...");
     let device = Device::cuda_if_available(0).unwrap();
-    weight_decry_demo(&device).unwrap()
+    conv_neural_networks_v2(&device).unwrap();
+    // conv_neural_networks(&device).unwrap();
+    // deep_learning_superparam_demo(&device).unwrap();
+
+    // deep_learning_simple_dropout_demo(&device).unwrap();
+    // weight_decry_demo(&device).unwrap()
     // one_hot_cold_demo(&device).unwrap();
     // two_layer_deep_learning_demo_v2(&device).unwrap();
     // two_layer_deep_learning_demo(&device).unwrap();
