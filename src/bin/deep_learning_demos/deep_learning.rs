@@ -1921,7 +1921,7 @@ fn conv2D(input_2d_data: Tensor, kern: Tensor, device: &Device) -> Result<Tensor
 
 ///
 /// 3D特征图表示为 [H×W×D]，其中H是高度，W是宽度，D是深度。
-/// 3D特征图可以看作D个2D数据，每个2D数据的尺寸均是 [H×W]，称为特征图，3D特征图总共有 D个特征图
+/// 3D特征图可以看作D个2D数据，每个2D数据的尺寸均是 [H×W]i，称为特征图，3D特征图总共有 D个特征图
 /// 
 fn conv_neural_networks_v2(device: &Device) -> Result<()> {
     let h = 32;

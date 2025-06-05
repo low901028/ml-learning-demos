@@ -56,6 +56,10 @@ path = "src/bin/prithvi/prithvi_geo_candle_demo.rs"
 [[bin]]
 name = "deep_learning"
 path = "src/bin/deep_learning_demos/deep_learning.rs"
+
+[[bin]]
+name = "conv_2d_demos"
+path = "src/bin/convolutional_demos/conv2d_demos.rs"
 #[env]
 #CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=true
 #PYTHONPATH="/usr/local/lib/python3.11/site-packages:{$PYTHONPATH}"
